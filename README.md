@@ -54,7 +54,8 @@ a time, attaching from a second terminal detaches the first.
 | `Ctrl+B` `1`–`9` | Go to workspace, an empty one starts a shell |
 | `Ctrl+B` `←↑↓→` | Focus the pane in that direction |
 | `Ctrl+B` `o` | Focus the next pane |
-| `Ctrl+B` `[` / `PgUp` | Scroll back and copy with vim keys (`v` select, `y` copy, `q` quit) |
+| `Ctrl+B` `[` | Copy mode: scroll back with vim keys (`Ctrl-U`/`Ctrl-D`, `Ctrl-B`/`Ctrl-F`, `g`/`G`), `v` select, `y` copy, `q` quit |
+| `Ctrl+B` `u` | Copy mode, one page up right away (`PgUp` works too) |
 | `Ctrl+B` `Ctrl+←↑↓→` | Resize by one cell (`Alt` for five), floating panes too |
 | `Ctrl+B` `q` | Quit menu: detach, close the pane or end the session |
 | `Ctrl+B` `d` | Detach, the shells keep running |

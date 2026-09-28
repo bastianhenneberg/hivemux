@@ -707,6 +707,8 @@ impl App {
             KeyCode::Esc | KeyCode::Char('q') => self.leave_copy(),
             KeyCode::Char('u') if ctrl => self.copy_scroll(half),
             KeyCode::Char('d') if ctrl => self.copy_scroll(-half),
+            KeyCode::Char('b') if ctrl => self.copy_scroll(2 * half),
+            KeyCode::Char('f') if ctrl => self.copy_scroll(-2 * half),
             KeyCode::PageUp => self.copy_scroll(2 * half),
             KeyCode::PageDown => self.copy_scroll(-2 * half),
             KeyCode::Char('k') | KeyCode::Up => self.copy_move(-1, 0),
@@ -1418,7 +1420,7 @@ impl App {
             Mode::Copy => {
                 spans.push(Span::styled(" COPY ", badge));
                 spans.push(Span::styled(
-                    "  hjkl ↑↓ move · ^U ^D page · g G top/bottom · v select · y copy · q quit",
+                    "  hjkl move · ^U ^D half page · ^B ^F page · g G top/bottom · v select · y copy · q quit",
                     Style::new().fg(HONEY),
                 ));
             }

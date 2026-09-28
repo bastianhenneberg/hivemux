@@ -225,11 +225,17 @@ pub const BINDINGS: &[Binding] = &[
         ],
     },
     Binding {
-        label: "[ PgUp",
-        description: "scroll back / copy",
+        label: "[",
+        description: "copy mode",
+        group: Group::Navigate,
+        keys: &[(Key::plain(Char('[')), C::CopyMode)],
+    },
+    Binding {
+        label: "u",
+        description: "scroll back a page",
         group: Group::Navigate,
         keys: &[
-            (Key::plain(Char('[')), C::CopyMode),
+            (Key::plain(Char('u')), C::ScrollBack),
             (Key::plain(KeyCode::PageUp), C::ScrollBack),
         ],
     },
