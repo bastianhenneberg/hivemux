@@ -1919,7 +1919,19 @@ impl App {
                     Span::raw(path),
                     Span::raw(" "),
                 ]);
-                frame.render_widget(line.right_aligned(), area);
+                // Alone in its line the path starts on the left, where the
+                // eye is. Next to the control bar or tabs it goes right.
+                if left.width() == 0 {
+                    frame.render_widget(Line::from(" ").patch_style(Style::new()), area);
+                    let area = Rect {
+                        x: area.x + 1,
+                        width: area.width.saturating_sub(1),
+                        ..area
+                    };
+                    frame.render_widget(line, area);
+                } else {
+                    frame.render_widget(line.right_aligned(), area);
+                }
             }
         }
         frame.render_widget(left, area);

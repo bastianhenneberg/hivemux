@@ -74,7 +74,16 @@ pub fn kill_server() -> Result<()> {
     let path = socket_path()?;
     let mut stream = UnixStream::connect(&path).context("no hivemux server running")?;
     ClientMsg::KillServer.write_to(&mut stream)?;
-    Ok(())
+    // Wait until the server has closed every shell and let go of the
+    // socket, so `hivemux kill-server && hivemux` starts a new one instead
+    // of reaching the old one on its way out.
+    for _ in 0..150 {
+        if UnixStream::connect(&path).is_err() {
+            return Ok(());
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    bail!("the server did not shut down within 3 seconds")
 }
 
 /// Sends `request` to the running server and returns its answer.
