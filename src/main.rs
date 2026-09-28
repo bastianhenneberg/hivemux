@@ -10,6 +10,7 @@ mod layout;
 mod menu;
 mod mouse;
 mod pane;
+mod persist;
 mod protocol;
 mod render;
 mod server;

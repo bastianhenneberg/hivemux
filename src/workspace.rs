@@ -2,6 +2,7 @@
 //! has focus. Pure geometry, the panes themselves live in the app.
 
 use ratatui::layout::{Position, Rect};
+use serde::{Deserialize, Serialize};
 
 use crate::layout::{Axis, Direction, Layout, PaneId};
 
@@ -9,13 +10,13 @@ use crate::layout::{Axis, Direction, Layout, PaneId};
 pub const MIN_FLOAT_WIDTH: u16 = 12;
 pub const MIN_FLOAT_HEIGHT: u16 = 5;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Float {
     pub id: PaneId,
     pub rect: Rect,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Workspace {
     pub layout: Layout,
     /// Floating panes, bottom to top.
@@ -49,6 +50,13 @@ impl Workspace {
 
     pub fn is_empty(&self) -> bool {
         self.layout.is_empty() && self.floats.is_empty()
+    }
+
+    /// Every pane in this workspace, tiled ones first.
+    pub fn panes(&self) -> Vec<PaneId> {
+        let mut all = self.layout.panes();
+        all.extend(self.floats.iter().map(|f| f.id));
+        all
     }
 
     pub fn contains(&self, pane: PaneId) -> bool {
@@ -118,8 +126,7 @@ impl Workspace {
 
     /// Focuses the next pane: through the tiled ones, then the floating ones.
     pub fn cycle_focus(&mut self) {
-        let mut all = self.layout.panes();
-        all.extend(self.floats.iter().map(|f| f.id));
+        let all = self.panes();
         if let Some(i) = all.iter().position(|&p| p == self.focus) {
             self.focus(all[(i + 1) % all.len()]);
         }

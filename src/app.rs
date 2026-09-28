@@ -21,13 +21,14 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Clear, Padding, Paragraph};
 use ratatui::{Frame, Terminal, TerminalOptions, Viewport};
 
-use crate::agent::AgentState;
+use crate::agent::{self, AgentState};
 use crate::bindings::{self, Command, Menu};
 use crate::config::{Bars, Config, Placement, SETTINGS};
 use crate::keys;
 use crate::layout::{Axis, MIN_PANE_SIZE, PaneId};
 use crate::menu::{self, HONEY};
 use crate::pane::{Pane, Spawn};
+use crate::persist::{self, Saved, SavedPane};
 use crate::protocol::{ClientMsg, Reply, Request, ServerMsg};
 use crate::render::ScreenView;
 use crate::workspace::Workspace;
@@ -198,6 +199,11 @@ pub struct App {
     socket: PathBuf,
     /// The last agent state seen per pane, and since when it holds.
     agents: HashMap<PaneId, (AgentState, Instant)>,
+    /// Where the layout is saved to survive a restart, see `persist`.
+    state_path: Option<PathBuf>,
+    /// What was saved last, to write only when something changed.
+    last_saved: String,
+    last_save_at: Instant,
     events: Sender<AppEvent>,
     title: String,
     config: Config,
@@ -223,25 +229,13 @@ impl App {
             eprintln!("config: {e}");
         }
         let body = screen_layout(DEFAULT_SCREEN, &config.bars).body;
-        let inner = pane_inner(body);
-        let first = Pane::spawn(
-            Spawn {
-                id: 0,
-                rows: inner.height,
-                cols: inner.width,
-                cwd: None,
-                command: &[],
-                socket: &socket,
-            },
-            events.clone(),
-        )?;
 
         let mut app = App {
-            panes: HashMap::from([(0, first)]),
-            ws: Workspace::new(0),
+            panes: HashMap::new(),
+            ws: Workspace::empty(),
             workspace: 1,
             hidden: BTreeMap::new(),
-            next_id: 1,
+            next_id: 0,
             screen: DEFAULT_SCREEN,
             body,
             client: None,
@@ -249,6 +243,9 @@ impl App {
             next_client_id: 0,
             socket,
             agents: HashMap::new(),
+            state_path: persist::path().ok(),
+            last_saved: String::new(),
+            last_save_at: Instant::now(),
             events,
             title: shell_name(),
             config,
@@ -260,11 +257,148 @@ impl App {
             flash: None,
             quit: false,
         };
+        app.restore();
+        if app.panes.is_empty() {
+            app.start_fresh()?;
+        }
         app.event_loop(rx);
         if let Some(mut client) = app.client.take() {
             let _ = client.send(&ServerMsg::Exited);
         }
+        // The session was ended on purpose, there is nothing to bring back.
+        // A server that dies with the machine never gets here.
+        if let Some(path) = &app.state_path {
+            persist::remove(path);
+        }
         Ok(())
+    }
+
+    /// One shell in workspace 1.
+    fn start_fresh(&mut self) -> Result<()> {
+        let inner = pane_inner(self.body);
+        let first = Pane::spawn(
+            Spawn {
+                id: 0,
+                rows: inner.height,
+                cols: inner.width,
+                cwd: None,
+                command: &[],
+                socket: &self.socket,
+            },
+            self.events.clone(),
+        )?;
+        self.panes.insert(0, first);
+        self.ws = Workspace::new(0);
+        self.workspace = 1;
+        self.hidden.clear();
+        self.next_id = 1;
+        Ok(())
+    }
+
+    /// Brings back the layout saved before the server last died: every
+    /// workspace, split and floating pane, each shell in its old directory,
+    /// agents with their resume command typed in.
+    fn restore(&mut self) {
+        let Some(path) = self.state_path.clone() else {
+            return;
+        };
+        let saved = match persist::load(&path) {
+            Ok(Some(saved)) => saved,
+            Ok(None) => return,
+            Err(e) => {
+                eprintln!("not restoring the session: {e:#}");
+                return;
+            }
+        };
+
+        let mut workspaces = saved.workspaces;
+        for ws in workspaces.values_mut() {
+            for (id, rect) in ws.rects(self.body) {
+                let spec = saved.panes.get(&id).cloned().unwrap_or_default();
+                let inner = pane_inner(rect);
+                let spawned = Pane::spawn(
+                    Spawn {
+                        id,
+                        rows: inner.height,
+                        cols: inner.width,
+                        cwd: spec.cwd.as_deref(),
+                        command: &[],
+                        socket: &self.socket,
+                    },
+                    self.events.clone(),
+                );
+                match spawned {
+                    Ok(mut pane) => {
+                        if let Some(command) = spec.resume_command() {
+                            let _ = pane.write(format!("{command}\r").as_bytes());
+                        }
+                        pane.session = spec.session.clone();
+                        self.panes.insert(id, pane);
+                    }
+                    Err(e) => {
+                        eprintln!("could not restore pane {id}: {e:#}");
+                        ws.remove(id);
+                    }
+                }
+            }
+        }
+        workspaces.retain(|_, ws| !ws.is_empty());
+        self.next_id = self.panes.keys().max().map_or(0, |id| id + 1);
+
+        let active = if workspaces.contains_key(&saved.active) {
+            Some(saved.active)
+        } else {
+            workspaces.keys().next().copied()
+        };
+        let Some(active) = active else {
+            return;
+        };
+        self.ws = workspaces.remove(&active).expect("checked above");
+        self.workspace = active;
+        self.hidden = workspaces;
+        let count = self.panes.len();
+        self.flash = Some(format!(
+            "restored {count} {} from before the restart",
+            if count == 1 { "pane" } else { "panes" }
+        ));
+    }
+
+    /// Saves the layout when it changed, at most once a second.
+    fn save_state(&mut self) {
+        let Some(path) = self.state_path.clone() else {
+            return;
+        };
+        if self.last_save_at.elapsed() < Duration::from_secs(1) {
+            return;
+        }
+        self.last_save_at = Instant::now();
+
+        let mut workspaces = self.hidden.clone();
+        workspaces.insert(self.workspace, self.ws.clone());
+        let panes = self
+            .panes
+            .iter()
+            .map(|(&id, pane)| {
+                let argv = pane.foreground_argv();
+                let saved = SavedPane {
+                    cwd: pane.cwd(),
+                    agent: agent::agent_name(&argv).map(str::to_owned),
+                    session: pane.session.clone(),
+                };
+                (id, saved)
+            })
+            .collect();
+        let saved = Saved::new(self.workspace, workspaces, panes);
+        let Ok(json) = persist::to_json(&saved) else {
+            return;
+        };
+        if json == self.last_saved {
+            return;
+        }
+        match persist::write(&path, &json) {
+            Ok(()) => self.last_saved = json,
+            Err(e) => eprintln!("could not save the session: {e:#}"),
+        }
     }
 
     fn event_loop(&mut self, rx: &Receiver<AppEvent>) {
@@ -272,6 +406,7 @@ impl App {
             self.body = screen_layout(self.screen, &self.config.bars).body;
             self.sync_sizes();
             self.update_agents();
+            self.save_state();
             self.render();
 
             // Block for the next event, then take everything else that is

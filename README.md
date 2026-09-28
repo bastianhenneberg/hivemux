@@ -26,7 +26,7 @@ Inspired by [TUIOS](https://github.com/Gaurav-Gosain/tuios) and [herdr](https://
 4. ~~Floating windows and workspaces~~ ✓
 5. ~~Copy mode, scrollback, mouse~~ ✓
 6. ~~Agent status, socket API~~ ✓
-7. Layout persistence across restarts
+7. ~~Layout persistence across restarts~~ ✓
 
 ## Build
 
@@ -97,6 +97,15 @@ hivemux send --pane 3 "run the tests"          # type into a pane, then Enter
 hivemux new --workspace 2 -- claude --resume   # start a command in a new pane
 hivemux new --float                            # a floating shell
 ```
+
+## Restarts
+
+hivemux saves the layout to `~/.local/state/hivemux/session.json` while it runs: workspaces,
+splits, floating panes and each pane's directory. If the server dies with the machine, the next
+`hivemux` brings the layout back, shells start in their old directories, and Claude Code and
+Codex sessions known from the hooks are resumed (`claude --resume <id>`). Processes and screen
+contents cannot survive a restart. Ending the session on purpose (`Ctrl+B Q`, `kill-server`, or
+exiting the last shell) deletes the file.
 
 ## Mouse
 

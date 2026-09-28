@@ -4,11 +4,12 @@
 //! by `PaneId`.
 
 use ratatui::layout::Rect;
+use serde::{Deserialize, Serialize};
 
 pub type PaneId = usize;
 
 /// How a split arranges its two children.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Axis {
     /// Side by side, divided by a vertical line (tmux `%`).
     Row,
@@ -37,7 +38,7 @@ impl Direction {
 /// side plus one cell of content.
 pub const MIN_PANE_SIZE: u16 = 3;
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 enum Node {
     Leaf(PaneId),
     Split {
@@ -49,7 +50,7 @@ enum Node {
     },
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Layout {
     root: Option<Node>,
 }

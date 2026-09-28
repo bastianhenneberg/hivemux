@@ -37,6 +37,10 @@ Projekt-Slug: `hivemux`
   `ClientMsg::Request` und bekommen `ServerMsg::Reply`. Befehle: `src/cli.rs`.
 - Agent-Tests ohne echten Agent: Skript namens `claude` im Scratchpad, das arbeitet und dann eine
   Frage stellt, per `hivemux new --workspace 2 -- <skript>` starten.
+- Persistenz: `src/persist.rs`, Datei `~/.local/state/hivemux/session.json` (mit `HIVEMUX_SOCKET`
+  daneben als `<socket>.state.json`, mit `HIVEMUX_STATE` frei wählbar). Gespeichert höchstens 1×/s
+  bei Änderung, gelöscht am Ende von `App::run` (nur bewusstes Beenden kommt dort an). Test: Server
+  mit `kill -9` töten und neu starten.
 - Tastenbelegung nach dem Prefix steht **nur** in `src/bindings.rs` (`BINDINGS`). Which-Key-Menü,
   Hilfe-Overlay und `hivemux keys` lesen daraus, neue Befehle dort eintragen, nicht in `app.rs`.
 - Einstellungen: `src/config.rs` (serde/TOML, `SETTINGS`-Tabelle fürs Settings-Menü). Neue
