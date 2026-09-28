@@ -17,7 +17,7 @@ use ratatui::crossterm::event::{
     Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
 use ratatui::layout::{Position, Rect};
-use ratatui::style::{Modifier, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Clear, Padding, Paragraph};
 use ratatui::{Frame, Terminal, TerminalOptions, Viewport};
@@ -1360,6 +1360,15 @@ impl App {
             }
             return Ok(());
         };
+        self.run_command(command)?;
+        if command.repeatable() {
+            self.mode = Mode::Repeat(Instant::now() + REPEAT_TIME, menu);
+        }
+        Ok(())
+    }
+
+    /// Carries out `command`, pressed as a key or clicked as a button.
+    fn run_command(&mut self, command: Command) -> Result<()> {
         match command {
             Command::SplitRow => self.split(Axis::Row),
             Command::SplitColumn => self.split(Axis::Column),
@@ -1436,7 +1445,7 @@ impl App {
             Command::Settings => self.mode = Mode::Settings(0),
             Command::Workspace(n) => self.switch_workspace(n),
             Command::NewWorkspace => {
-                if let Some(n) = (1..=9).find(|n| !self.workspace_exists(*n)) {
+                if let Some(n) = self.free_workspace() {
                     self.switch_workspace(n);
                 }
             }
@@ -1449,9 +1458,6 @@ impl App {
                 }
             }
             Command::Cancel => {}
-        }
-        if command.repeatable() {
-            self.mode = Mode::Repeat(Instant::now() + REPEAT_TIME, menu);
         }
         Ok(())
     }
@@ -1784,9 +1790,21 @@ impl App {
             MouseEventKind::Down(MouseButton::Left) => {
                 self.selection = None;
                 self.flash = None;
+                // 0 is the + after the tabs.
                 if let Some(n) = self.tab_at(pos) {
-                    self.switch_workspace(n);
+                    if n == 0 {
+                        self.run_command(Command::NewWorkspace)?;
+                    } else {
+                        self.switch_workspace(n);
+                    }
                     return Ok(());
+                }
+                if let Some(area) = self.sidebar
+                    && let Some(button) = sidebar_buttons(area)
+                        .into_iter()
+                        .find(|b| b.area.contains(pos))
+                {
+                    return self.run_command(button.command);
                 }
                 if let Some(area) = self.sidebar.filter(|area| area.contains(pos)) {
                     let data = self.sidebar_data();
@@ -1804,6 +1822,14 @@ impl App {
                 let Some((id, rect)) = self.pane_at(pos) else {
                     return Ok(());
                 };
+                if !self.focus_mode
+                    && let Some(button) = pane_buttons(rect, self.ws.is_floating(id))
+                        .into_iter()
+                        .find(|b| b.area.contains(pos))
+                {
+                    self.ws.focus(id);
+                    return self.run_command(button.command);
+                }
                 // A border where two tiled panes meet moves when dragged.
                 if !self.ws.is_floating(id)
                     && self.ws.zoomed.is_none()
@@ -2049,7 +2075,13 @@ impl App {
             }
             x += width;
         }
-        None
+        (self.free_workspace().is_some() && (x..x + NEW_TAB.len() as u16).contains(&pos.x))
+            .then_some(0)
+    }
+
+    /// The first workspace number not in use.
+    fn free_workspace(&self) -> Option<u8> {
+        (1..=9).find(|n| !self.workspace_exists(*n))
     }
 
     /// Remembers the previously focused pane whenever focus moves, however
@@ -3012,6 +3044,7 @@ impl App {
                     .border_style(border)
                     .title(Line::from(title));
                 frame.render_widget(block, rect);
+                draw_buttons(frame, &pane_buttons(rect, floating));
             }
 
             let selection = self.selection.filter(|s| s.pane == id).map(|s| {
@@ -3059,6 +3092,7 @@ impl App {
                 selected,
                 self.sidebar_scroll,
             );
+            draw_buttons(frame, &sidebar_buttons(area));
         }
         if let Some(area) = screen.top {
             self.draw_bar(frame, area, Placement::Top);
@@ -3290,6 +3324,9 @@ impl App {
         }
         if bars.tabs == side {
             spans.extend(self.tab_spans());
+            if self.free_workspace().is_some() {
+                spans.push(Span::styled(NEW_TAB, Style::new().fg(t.success)));
+            }
             spans.push(Span::styled(if control { "│ " } else { " " }, hint));
         }
         if control {
@@ -3675,6 +3712,94 @@ fn find_in_rows(
 const MAX_NAME: usize = 32;
 
 /// A workspace tab: its number, and its name if it has one.
+/// The button after the tabs that opens a new workspace.
+const NEW_TAB: &str = " + ";
+
+/// A label in a border that runs a command when clicked.
+struct Button {
+    area: Rect,
+    label: &'static str,
+    command: Command,
+    color: Color,
+}
+
+/// Puts `items` side by side in the one-row `row`, from its right end with
+/// `right`, leaving all out if they do not fit.
+fn place_buttons(row: Rect, items: &[(&'static str, Command, Color)], right: bool) -> Vec<Button> {
+    let width: u16 = items.iter().map(|(l, ..)| l.chars().count() as u16).sum();
+    if width > row.width {
+        return Vec::new();
+    }
+    let mut x = if right { row.right() - width } else { row.x };
+    items
+        .iter()
+        .map(|&(label, command, color)| {
+            let w = label.chars().count() as u16;
+            let area = Rect::new(x, row.y, w, 1);
+            x += w;
+            Button {
+                area,
+                label,
+                command,
+                color,
+            }
+        })
+        .collect()
+}
+
+/// Split, zoom and close in the top border of a pane at `rect`, when it
+/// is wide enough to keep room for its title. Floating panes only close.
+fn pane_buttons(rect: Rect, floating: bool) -> Vec<Button> {
+    if rect.width < 36 || rect.height < 3 {
+        return Vec::new();
+    }
+    let t = theme::current();
+    let row = Rect::new(rect.x + 1, rect.y, rect.width - 3, 1);
+    let all = [
+        (" ┃ ", Command::SplitRow, t.blue),
+        (" ━ ", Command::SplitColumn, t.blue),
+        (" ⤢ ", Command::Zoom, t.cyan),
+        (" × ", Command::ClosePane, t.danger),
+    ];
+    place_buttons(row, if floating { &all[3..] } else { &all }, true)
+}
+
+/// New workspace, new floating pane and the settings in the sidebar's
+/// bottom border.
+fn sidebar_buttons(area: Rect) -> Vec<Button> {
+    if area.height < 3 {
+        return Vec::new();
+    }
+    let t = theme::current();
+    let row = Rect::new(
+        area.x + 1,
+        area.bottom() - 1,
+        area.width.saturating_sub(2),
+        1,
+    );
+    place_buttons(
+        row,
+        &[
+            (" + workspace ", Command::NewWorkspace, t.success),
+            (" ⧉ float ", Command::NewFloat, t.cyan),
+            (" ⚙ ", Command::Settings, t.orange),
+        ],
+        false,
+    )
+}
+
+fn draw_buttons(frame: &mut Frame, buttons: &[Button]) {
+    for button in buttons {
+        frame.render_widget(
+            Span::styled(
+                button.label,
+                Style::new().fg(button.color).add_modifier(Modifier::BOLD),
+            ),
+            button.area,
+        );
+    }
+}
+
 fn tab_label(n: u8, ws: &Workspace) -> String {
     match &ws.name {
         Some(name) => format!(" {n} {name} "),
@@ -3728,6 +3853,19 @@ fn shell_name() -> String {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn pane_buttons_sit_right_in_the_top_border() {
+        let buttons = pane_buttons(Rect::new(10, 5, 40, 10), false);
+        let labels: Vec<&str> = buttons.iter().map(|b| b.label.trim()).collect();
+        assert_eq!(labels, ["┃", "━", "⤢", "×"]);
+        let close = buttons.last().unwrap();
+        // One cell of border before the corner.
+        assert_eq!((close.area.right(), close.area.y), (48, 5));
+        assert_eq!(close.command, Command::ClosePane);
+        assert_eq!(pane_buttons(Rect::new(0, 0, 40, 10), true).len(), 1);
+        assert!(pane_buttons(Rect::new(0, 0, 20, 10), false).is_empty());
+    }
     use super::*;
 
     #[test]

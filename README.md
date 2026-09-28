@@ -176,7 +176,11 @@ the detection, the setting `images = false` turns it off.
 The terminal window's title shows the workspace and the focused pane, e.g. `hivemux · 2 api · claude`.
 
 
-- Click a pane to focus it, click a workspace tab to switch to it.
+- Click a pane to focus it, click a workspace tab to switch to it, `+` after the tabs opens a
+  new workspace.
+- The buttons in a pane's top border split it side by side (`┃`) or top and bottom (`━`), zoom
+  it (`⤢`) or close it (`×`, asks first). Floating panes have `×` only.
+- The sidebar's bottom border opens a new workspace, a new floating pane or the settings.
 - Drag the border between two panes to resize them.
 - Drag a floating pane by its title bar, resize it by its bottom right corner.
 - Drag over text to select it, it is copied when you let go. A double click copies a word.
