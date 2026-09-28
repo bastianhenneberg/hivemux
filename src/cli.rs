@@ -340,6 +340,17 @@ fn take_value(args: &mut Vec<String>, option: &str) -> Result<Option<String>> {
     Ok(Some(value))
 }
 
+/// `hivemux rename-session NAME`: renames the session this command is
+/// for, `-s` picks another.
+pub fn rename_session(args: &[String]) -> Result<()> {
+    let [name] = args else {
+        bail!("usage: hivemux rename-session NAME");
+    };
+    client::request(Request::RenameSession { name: name.clone() })?;
+    println!("renamed to {name}");
+    Ok(())
+}
+
 /// `hivemux update`: the running server becomes this binary, keeping every
 /// pane and the attached client, see `upgrade`.
 pub fn update() -> Result<()> {

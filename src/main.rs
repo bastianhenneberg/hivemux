@@ -32,6 +32,8 @@ Commands:
   (none)        attach to the session, or start it
   attach        attach to the session (`attach -t NAME` works too)
   ls            list the running sessions
+  rename-session NAME
+                rename the session (`-s OLD rename-session NEW` for another)
   kill-server   shut down the session's server and every pane in it
   update        move the running server to this binary, e.g. after
                 `cargo install`; panes, programs and screens stay
@@ -101,6 +103,7 @@ fn main() -> Result<()> {
         ["wait", ..] => cli::wait(&args[1..]),
         ["hooks"] => cli::hooks(),
         ["update"] => cli::update(),
+        ["rename-session", ..] => cli::rename_session(&args[1..]),
         ["help" | "-h" | "--help"] => {
             println!("{USAGE}");
             Ok(())

@@ -73,6 +73,8 @@ pub enum Request {
         target: RenameTarget,
         name: Option<String>,
     },
+    /// Rename the session.
+    RenameSession { name: String },
     /// Replace the server with the binary at `exe`, keeping the session,
     /// see `upgrade`.
     Upgrade { exe: PathBuf },
@@ -200,6 +202,9 @@ fn invalid(msg: String) -> io::Error {
 /// The session this process belongs to: `$HIVEMUX_SESSION`, set by
 /// `hivemux -s NAME`, or `default`.
 pub fn session_name() -> String {
+    if let Some(name) = RENAMED.lock().unwrap().clone() {
+        return name;
+    }
     std::env::var("HIVEMUX_SESSION")
         .ok()
         .filter(|name| valid_session_name(name))
@@ -207,6 +212,15 @@ pub fn session_name() -> String {
 }
 
 pub const DEFAULT_SESSION: &str = "default";
+
+/// The session's name after the server was renamed, which the environment
+/// it started with does not know.
+static RENAMED: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+/// Renames this process's session, see `App::rename_session`.
+pub fn set_session_name(name: &str) {
+    *RENAMED.lock().unwrap() = Some(name.to_owned());
+}
 
 /// Session names become file names: letters, digits, `-` and `_`.
 pub fn valid_session_name(name: &str) -> bool {
@@ -258,6 +272,8 @@ pub fn sessions() -> Vec<String> {
     };
     let mut names: Vec<String> = entries
         .flatten()
+        // Links are old names of renamed sessions.
+        .filter(|entry| entry.file_type().is_ok_and(|t| !t.is_symlink()))
         .filter_map(|entry| {
             let path = entry.path();
             let name = path

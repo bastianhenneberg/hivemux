@@ -111,9 +111,11 @@ struct Prompt {
     text: String,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 enum PromptFor {
     Rename(RenameTarget),
+    /// A new name for the session called this.
+    RenameSession(String),
     /// Searching the copy mode's pane, down or up.
     Search {
         forward: bool,
@@ -259,6 +261,9 @@ pub struct App {
     listener: RawFd,
     /// The binary `hivemux update` asked to become, once the reply is out.
     upgrade_to: Option<PathBuf>,
+    /// Links from the session's old socket names to its socket, so panes
+    /// started before a rename still reach it. Removed at the end.
+    old_sockets: Vec<PathBuf>,
     /// The focused pane's repository, for the sidebar.
     git: Option<GitState>,
     /// The focused pane's project, for the sidebar.
@@ -341,6 +346,7 @@ impl App {
             focus_mode: false,
             listener,
             upgrade_to: None,
+            old_sockets: Vec::new(),
             git: None,
             files: FileTree::default(),
             sidebar_scroll: 0,
@@ -381,6 +387,9 @@ impl App {
         app.event_loop(rx);
         if let Some(mut client) = app.client.take() {
             let _ = client.send(&ServerMsg::Exited);
+        }
+        for link in &app.old_sockets {
+            let _ = std::fs::remove_file(link);
         }
         // The session was ended on purpose, there is nothing to bring back.
         // A server that dies with the machine never gets here.
@@ -858,6 +867,10 @@ impl App {
                 workspace,
                 cwd,
             } => self.new_pane(&command, float, workspace, cwd),
+            Request::RenameSession { name } => {
+                self.rename_session(&name)?;
+                Ok(serde_json::json!({ "session": name }))
+            }
             Request::Upgrade { exe } => {
                 if !exe.is_file() {
                     return Err(format!("{} does not exist", exe.display()));
@@ -2189,6 +2202,16 @@ impl App {
             }
             KeyCode::Enter => selected,
             KeyCode::Char('n') => count - 1,
+            KeyCode::Char('r') => {
+                if let Some(name) = names.get(selected) {
+                    self.prompt = Some(Prompt {
+                        purpose: PromptFor::RenameSession(name.clone()),
+                        text: name.clone(),
+                    });
+                    self.mode = Mode::Prompt;
+                }
+                return;
+            }
             KeyCode::Char(c) => match items.iter().position(|item| item.key == c) {
                 Some(i) => i,
                 None => return,
@@ -2207,6 +2230,62 @@ impl App {
                 self.mode = Mode::Prompt;
             }
         }
+    }
+
+    /// Renames this session: its socket and saved state move to the new
+    /// name, the old socket name stays as a link for the panes' hooks.
+    fn rename_session(&mut self, name: &str) -> std::result::Result<(), String> {
+        if !protocol::valid_session_name(name) {
+            return Err("session names use letters, digits, - and _".into());
+        }
+        if name == protocol::session_name() {
+            return Ok(());
+        }
+        if std::env::var_os("HIVEMUX_SOCKET").is_some() {
+            return Err("a session on a socket from HIVEMUX_SOCKET has no name to change".into());
+        }
+        let socket = protocol::session_socket(name).map_err(|e| e.to_string())?;
+        if UnixStream::connect(&socket).is_ok() {
+            return Err(format!("there is a session called {name} already"));
+        }
+        let old = self.socket.clone();
+        std::fs::rename(&old, &socket).map_err(|e| format!("cannot rename the socket: {e}"))?;
+        let _ = std::fs::rename(old.with_extension("log"), socket.with_extension("log"));
+        if std::os::unix::fs::symlink(&socket, &old).is_ok() {
+            self.old_sockets.push(old);
+        }
+        protocol::set_session_name(name);
+        self.socket = socket;
+        let state = persist::path().ok();
+        if let (Some(from), Some(to)) = (&self.state_path, &state) {
+            let _ = std::fs::rename(from, to);
+        }
+        self.state_path = state;
+        self.last_saved.clear();
+        Ok(())
+    }
+
+    /// Asks the server of session `old` to be called `name`.
+    fn rename_other_session(&mut self, old: &str, name: &str) {
+        let result = if old == protocol::session_name() {
+            self.rename_session(name)
+        } else {
+            protocol::session_socket(old)
+                .and_then(|socket| {
+                    crate::client::request_at(
+                        &socket,
+                        Request::RenameSession {
+                            name: name.to_owned(),
+                        },
+                    )
+                })
+                .map(|_| ())
+                .map_err(|e| format!("{e:#}"))
+        };
+        self.flash = Some(match result {
+            Ok(()) => format!("session {old} is now {name}"),
+            Err(e) => format!("not renamed: {e}"),
+        });
     }
 
     /// Sends the client on to session `name`; it starts it if needed.
@@ -2474,6 +2553,10 @@ impl App {
                         if let Err(e) = self.rename(target, name) {
                             self.flash = Some(e);
                         }
+                    }
+                    PromptFor::RenameSession(old) => {
+                        self.mode = Mode::Normal;
+                        self.rename_other_session(&old, text.trim());
                     }
                     PromptFor::NewSession => {
                         let name = text.trim().to_owned();
@@ -3167,12 +3250,13 @@ impl App {
     /// at the end of the text.
     fn draw_prompt(&self, frame: &mut Frame, area: Rect) {
         let Some(prompt) = &self.prompt else { return };
-        let title = match prompt.purpose {
+        let title = match &prompt.purpose {
             PromptFor::Rename(RenameTarget::Pane(id)) => format!(" Name pane {id} "),
             PromptFor::Rename(RenameTarget::Workspace(n)) => format!(" Name workspace {n} "),
             PromptFor::Search { forward: true } => " Search down ".to_owned(),
             PromptFor::Search { forward: false } => " Search up ".to_owned(),
             PromptFor::NewSession => " New session ".to_owned(),
+            PromptFor::RenameSession(old) => format!(" Rename session {old} "),
         };
         let accent = theme::current().accent;
         let hint = Style::new().add_modifier(Modifier::DIM);
@@ -3187,6 +3271,7 @@ impl App {
                     PromptFor::Rename(_) => "Enter save · empty clears the name · Esc cancel",
                     PromptFor::Search { .. } => "Enter find · then n next, N previous · Esc cancel",
                     PromptFor::NewSession => "Enter start and switch · letters, digits, - and _",
+                    PromptFor::RenameSession(_) => "Enter rename · letters, digits, - and _",
                 },
                 hint,
             ),
@@ -3428,7 +3513,7 @@ impl App {
             Mode::Sessions(_) => (
                 "SESSIONS",
                 t.magenta,
-                "↑↓ choose · Enter switch · n new · Esc cancel",
+                "↑↓ choose · Enter switch · r rename · n new · Esc cancel",
             ),
             Mode::Picker => ("GO TO", t.cyan, "type to filter · Enter go · Esc cancel"),
             Mode::Sidebar(_) => (

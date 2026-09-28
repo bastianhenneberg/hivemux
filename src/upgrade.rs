@@ -104,8 +104,15 @@ pub fn exec(exe: &Path, socket: &Path, handover: &Handover) -> anyhow::Error {
         Ok(())
     })();
     let error = match result {
-        Ok(()) => anyhow::Error::from(Command::new(exe).arg("server").env(ENV, &path).exec())
-            .context(format!("cannot run {}", exe.display())),
+        Ok(()) => anyhow::Error::from(
+            Command::new(exe)
+                .arg("server")
+                .env(ENV, &path)
+                // It may have been renamed since it started.
+                .env("HIVEMUX_SESSION", crate::protocol::session_name())
+                .exec(),
+        )
+        .context(format!("cannot run {}", exe.display())),
         Err(e) => e,
     };
     for &fd in &fds {

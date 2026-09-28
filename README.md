@@ -47,7 +47,8 @@ a time, attaching from a second terminal detaches the first.
 
 Sessions are separate servers with their own panes, socket and saved layout. `hivemux -s NAME`
 (or `attach -t NAME`) picks one, `Ctrl+B S` switches between them without leaving the terminal,
-and named sessions show their name in the control bar.
+and named sessions show their name in the control bar. `r` in that menu, or
+`hivemux rename-session NAME` (`-s OLD` for another one), renames a session while it runs.
 
 | Key | Action |
 |---|---|

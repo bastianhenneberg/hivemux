@@ -51,5 +51,9 @@ pub fn run() -> Result<()> {
 
     let result = App::run(tx, &rx, path.clone(), listener_fd, handover);
     let _ = fs::remove_file(&path);
+    // Where it is now, if the session was renamed.
+    if let Ok(now) = socket_path() {
+        let _ = fs::remove_file(now);
+    }
     result
 }
