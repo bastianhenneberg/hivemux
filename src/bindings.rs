@@ -20,6 +20,7 @@ pub enum Command {
     Resize(Direction, u16),
     Detach,
     SessionMenu,
+    Settings,
     Quit,
     Help,
     SendPrefix,
@@ -177,6 +178,12 @@ pub const BINDINGS: &[Binding] = &[
         description: "quit hivemux",
         group: Group::Session,
         keys: &[(Key::plain(Char('Q')), C::Quit)],
+    },
+    Binding {
+        label: ",",
+        description: "settings",
+        group: Group::Session,
+        keys: &[(Key::plain(Char(',')), C::Settings)],
     },
     Binding {
         label: "?",

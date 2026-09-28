@@ -54,12 +54,25 @@ a time, attaching from a second terminal detaches the first.
 | `Ctrl+B` `q` | Quit menu: detach, close the pane or end the session |
 | `Ctrl+B` `d` | Detach, the shells keep running |
 | `Ctrl+B` `Q` | Quit: end the session and every shell in it (asks first) |
+| `Ctrl+B` `,` | Settings |
 | `Ctrl+B` `?` | Show all keys |
 | `Ctrl+B` `Ctrl+B` | Send `Ctrl+B` to the shell |
 
 Pressing `Ctrl+B` opens a menu with every key, like which-key in Neovim.
 Focus and resize repeat: for 600 ms after one of them, arrow keys work without the prefix.
 A pane closes when its shell exits, hivemux exits with the last pane.
+
+## Settings
+
+`Ctrl+B` `,` opens the settings. Changes apply right away and are saved to
+`~/.config/hivemux/config.toml` (or `$XDG_CONFIG_HOME/hivemux/`, or `$HIVEMUX_CONFIG`).
+The file can also be edited by hand, hivemux reads it when the server starts:
+
+```toml
+[which_key]
+enabled = true      # show the key menu after Ctrl+B
+position = "left"   # "left" or "right" bottom corner
+```
 
 ## License
 

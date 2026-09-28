@@ -25,8 +25,10 @@ Projekt-Slug: `hivemux`
   nach Cursor bzw. Größe. Bei Resize wird das Terminal neu gebaut.
 - Tastenbelegung nach dem Prefix steht **nur** in `src/bindings.rs` (`BINDINGS`). Which-Key-Menü,
   Hilfe-Overlay und `hivemux keys` lesen daraus, neue Befehle dort eintragen, nicht in `app.rs`.
-- Manuell testen ohne die eigene Session zu stören: `HIVEMUX_SOCKET=/tmp/x.sock` setzen,
-  headless in tmux starten (`tmux new-session -d ...`, `send-keys`, `capture-pane -p`).
+- Einstellungen: `src/config.rs` (serde/TOML, `SETTINGS`-Tabelle fürs Settings-Menü). Neue
+  Einstellung = Feld in `Config` + Eintrag in `SETTINGS`, das Menü liest nur die Tabelle.
+- Manuell testen ohne die eigene Session zu stören: `HIVEMUX_SOCKET=/tmp/x.sock` und `HIVEMUX_CONFIG=/tmp/x.toml`
+  setzen (sonst wird die echte Config überschrieben), headless in tmux starten (`tmux new-session -d ...`, `send-keys`, `capture-pane -p`).
 
 ## Befehle
 

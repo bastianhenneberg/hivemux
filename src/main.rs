@@ -1,6 +1,7 @@
 mod app;
 mod bindings;
 mod client;
+mod config;
 mod keys;
 mod layout;
 mod menu;

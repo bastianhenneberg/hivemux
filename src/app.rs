@@ -19,6 +19,7 @@ use ratatui::widgets::{Block, BorderType, Clear, Padding, Paragraph};
 use ratatui::{Frame, Terminal, TerminalOptions, Viewport};
 
 use crate::bindings::{self, Command};
+use crate::config::{Config, SETTINGS};
 use crate::keys;
 use crate::layout::{Axis, Layout, MIN_PANE_SIZE, PaneId};
 use crate::menu::{self, HONEY};
@@ -57,6 +58,8 @@ enum Mode {
     Help,
     /// The quit menu is open with the given entry selected.
     Menu(usize),
+    /// The settings menu is open with the given setting selected.
+    Settings(usize),
 }
 
 /// The entries of the quit menu, in order.
@@ -146,6 +149,10 @@ pub struct App {
     next_client_id: ClientId,
     events: Sender<AppEvent>,
     title: String,
+    config: Config,
+    /// Shown in the settings menu: where the config was saved, or why it
+    /// could not be loaded or saved.
+    config_note: Option<String>,
     mode: Mode,
     quit: bool,
 }
@@ -157,6 +164,10 @@ impl App {
         let body = body_area(DEFAULT_SCREEN);
         let inner = pane_inner(body);
         let first = Pane::spawn(0, inner.height, inner.width, events.clone())?;
+        let (config, config_error) = Config::load();
+        if let Some(e) = &config_error {
+            eprintln!("config: {e}");
+        }
 
         let mut app = App {
             panes: HashMap::from([(0, first)]),
@@ -169,6 +180,8 @@ impl App {
             next_client_id: 0,
             events,
             title: shell_name(),
+            config,
+            config_note: config_error.map(|e| format!("config ignored: {e}")),
             mode: Mode::Normal,
             quit: false,
         };
@@ -339,6 +352,10 @@ impl App {
                 self.menu_key(key, selected);
                 Ok(())
             }
+            Mode::Settings(selected) => {
+                self.settings_key(key, selected);
+                Ok(())
+            }
             Mode::Confirm(action) => {
                 self.mode = Mode::Normal;
                 if matches!(key.code, KeyCode::Char('y' | 'Y')) {
@@ -393,6 +410,7 @@ impl App {
             Command::Quit => self.mode = Mode::Confirm(Action::KillServer),
             Command::Help => self.mode = Mode::Help,
             Command::SessionMenu => self.mode = Mode::Menu(0),
+            Command::Settings => self.mode = Mode::Settings(0),
             // Prefix twice sends the prefix key itself to the pane.
             Command::SendPrefix => {
                 if let Some(pane) = self.panes.get_mut(&self.focus) {
@@ -434,6 +452,29 @@ impl App {
             MenuEntry::Detach => self.detach(),
             MenuEntry::ClosePane => self.close(self.focus),
             MenuEntry::EndSession => self.quit = true,
+        }
+    }
+
+    /// Moves through the settings and changes the selected one. Every
+    /// change applies right away and is saved to the config file.
+    fn settings_key(&mut self, key: KeyEvent, selected: usize) {
+        let count = SETTINGS.len();
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q' | ',') => self.mode = Mode::Normal,
+            KeyCode::Up | KeyCode::Char('k') => {
+                self.mode = Mode::Settings((selected + count - 1) % count);
+            }
+            KeyCode::Down | KeyCode::Char('j') | KeyCode::Tab => {
+                self.mode = Mode::Settings((selected + 1) % count);
+            }
+            KeyCode::Enter | KeyCode::Char(' ' | 'h' | 'l') | KeyCode::Left | KeyCode::Right => {
+                (SETTINGS[selected].cycle)(&mut self.config);
+                self.config_note = Some(match self.config.save() {
+                    Ok(path) => format!("saved to {}", tilde(&path)),
+                    Err(e) => format!("not saved: {e:#}"),
+                });
+            }
+            _ => {}
         }
     }
 
@@ -548,7 +589,10 @@ impl App {
             let cursor = view.cursor(inner);
             frame.render_widget(view, inner);
             if focused
-                && !matches!(self.mode, Mode::Confirm(_) | Mode::Help | Mode::Menu(_))
+                && !matches!(
+                    self.mode,
+                    Mode::Confirm(_) | Mode::Help | Mode::Menu(_) | Mode::Settings(_)
+                )
                 && let Some(position) = cursor
             {
                 frame.set_cursor_position(position);
@@ -558,11 +602,20 @@ impl App {
         frame.render_widget(self.status_line(), status_area);
 
         match self.mode {
-            Mode::Prefix => menu::draw_which_key(frame, body),
+            Mode::Prefix if self.config.which_key.enabled => {
+                menu::draw_which_key(frame, body, self.config.which_key.position);
+            }
+            Mode::Settings(selected) => menu::draw_settings(
+                frame,
+                body,
+                &self.config,
+                selected,
+                self.config_note.as_deref(),
+            ),
             Mode::Help => menu::draw_help(frame, body),
             Mode::Menu(selected) => menu::draw_quit_menu(frame, body, &self.menu_items(), selected),
             Mode::Confirm(action) => self.draw_confirm(frame, body, action),
-            Mode::Normal | Mode::Repeat(_) => {}
+            Mode::Prefix | Mode::Normal | Mode::Repeat(_) => {}
         }
     }
 
@@ -673,6 +726,13 @@ impl App {
                     Style::new().fg(HONEY),
                 ));
             }
+            Mode::Settings(_) => {
+                spans.push(Span::styled(" SETTINGS ", badge));
+                spans.push(Span::styled(
+                    "  ↑↓ select · ←→ Enter change · Esc close",
+                    Style::new().fg(HONEY),
+                ));
+            }
             Mode::Help => {
                 spans.push(Span::styled(" HELP ", badge));
                 spans.push(Span::styled("  any key closes", Style::new().fg(HONEY)));
@@ -744,6 +804,17 @@ fn body_area(screen: Rect) -> Rect {
 /// The area inside a pane's border, i.e. the size of its pty.
 fn pane_inner(rect: Rect) -> Rect {
     Block::bordered().inner(rect)
+}
+
+/// `path` with the home directory written as `~`.
+fn tilde(path: &std::path::Path) -> String {
+    match std::env::var_os("HOME") {
+        Some(home) => match path.strip_prefix(&home) {
+            Ok(rest) => format!("~/{}", rest.display()),
+            Err(_) => path.display().to_string(),
+        },
+        None => path.display().to_string(),
+    }
 }
 
 fn shell_name() -> String {

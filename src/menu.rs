@@ -8,6 +8,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Clear, Padding, Paragraph};
 
 use crate::bindings::{Binding, Group, PREFIX_LABEL, in_group};
+use crate::config::{Config, SETTINGS, Side};
 
 pub const HONEY: Color = Color::Rgb(250, 190, 0);
 
@@ -15,8 +16,8 @@ pub const HONEY: Color = Color::Rgb(250, 190, 0);
 const GAP: usize = 2;
 const GROUP_GAP: usize = 4;
 
-/// The which-key popup in the bottom right corner of `area`.
-pub fn draw_which_key(frame: &mut Frame, area: Rect) {
+/// The which-key popup in the bottom corner of `area` on `side`.
+pub fn draw_which_key(frame: &mut Frame, area: Rect, side: Side) {
     let area = inset(area);
     // Border and one column of padding on each side.
     let lines = groups(usize::from(area.width).saturating_sub(4));
@@ -25,7 +26,11 @@ pub fn draw_which_key(frame: &mut Frame, area: Rect) {
     let height = lines.len() as u16 + 2;
     let width = width.min(area.width);
     let height = height.min(area.height);
-    let popup = Rect::new(area.right() - width, area.bottom() - height, width, height);
+    let x = match side {
+        Side::Left => area.x,
+        Side::Right => area.right() - width,
+    };
+    let popup = Rect::new(x, area.bottom() - height, width, height);
 
     draw_box(frame, popup, format!(" ⬢ {PREFIX_LABEL} "), 1, lines);
 }
@@ -180,6 +185,69 @@ pub fn draw_quit_menu(frame: &mut Frame, area: Rect, items: &[MenuItem], selecte
     draw_box(frame, popup, " ⬢ Quit hivemux? ".into(), 2, lines);
 }
 
+/// The settings menu in the middle of `area`. `note` is shown below the
+/// settings, e.g. where they were saved.
+pub fn draw_settings(
+    frame: &mut Frame,
+    area: Rect,
+    config: &Config,
+    selected: usize,
+    note: Option<&str>,
+) {
+    let area = inset(area);
+    let name_width = SETTINGS
+        .iter()
+        .map(|s| s.name.chars().count())
+        .max()
+        .unwrap_or(0);
+    let value_width = 9;
+
+    let mut lines = Vec::new();
+    for (i, setting) in SETTINGS.iter().enumerate() {
+        let pad = name_width - setting.name.chars().count() + GROUP_GAP;
+        let value = format!("‹ {:^5} ›", (setting.value)(config));
+        let mut line = Line::from(vec![
+            Span::raw(" "),
+            Span::raw(setting.name),
+            Span::raw(" ".repeat(pad)),
+            Span::styled(format!("{value:<value_width$}"), key_style()),
+            Span::raw(" "),
+        ]);
+        if i == selected {
+            line = line.patch_style(Style::new().bg(Color::DarkGray));
+        }
+        lines.push(line);
+    }
+    lines.push(Line::default());
+    lines.push(Line::from(vec![
+        Span::styled("↑↓", key_style()),
+        Span::raw(" select   "),
+        Span::styled("←→ Enter", key_style()),
+        Span::raw(" change   "),
+        Span::styled("Esc", key_style()),
+        Span::raw(" close"),
+    ]));
+    // The note does not widen the box, a long path is cut off instead.
+    let width = lines.iter().map(Line::width).max().unwrap_or(0) as u16 + 6;
+    if let Some(note) = note {
+        let hint = lines.len() - 1;
+        lines.insert(
+            hint,
+            Line::styled(note.to_owned(), Style::new().add_modifier(Modifier::DIM)),
+        );
+    }
+    let height = lines.len() as u16 + 2;
+    let width = width.min(area.width);
+    let height = height.min(area.height);
+    let popup = Rect::new(
+        area.x + (area.width - width) / 2,
+        area.y + (area.height - height) / 2,
+        width,
+        height,
+    );
+    draw_box(frame, popup, " ⬢ Settings ".into(), 2, lines);
+}
+
 fn key_style() -> Style {
     Style::new().fg(HONEY).add_modifier(Modifier::BOLD)
 }
@@ -244,7 +312,7 @@ mod tests {
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 
-    fn render(width: u16, height: u16, draw: fn(&mut Frame, Rect)) -> String {
+    fn render(width: u16, height: u16, draw: impl Fn(&mut Frame, Rect)) -> String {
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
         terminal.draw(|frame| draw(frame, frame.area())).unwrap();
         let buffer = terminal.backend().buffer();
@@ -260,7 +328,7 @@ mod tests {
 
     #[test]
     fn which_key_fits_side_by_side_on_a_wide_screen() {
-        let screen = render(120, 30, draw_which_key);
+        let screen = render(120, 30, |f, a| draw_which_key(f, a, Side::Right));
         let row = screen
             .lines()
             .find(|l| l.contains("Panes"))
@@ -272,13 +340,38 @@ mod tests {
 
     #[test]
     fn which_key_stacks_on_a_narrow_screen() {
-        let screen = render(40, 40, draw_which_key);
+        let screen = render(40, 40, |f, a| draw_which_key(f, a, Side::Left));
         let row = screen
             .lines()
             .find(|l| l.contains("Panes"))
             .expect("Panes header");
         assert!(!row.contains("Navigate"));
         assert!(screen.contains("Navigate") && screen.contains("Session"));
+    }
+
+    #[test]
+    fn which_key_opens_on_the_chosen_side() {
+        let left = render(120, 30, |f, a| draw_which_key(f, a, Side::Left));
+        let right = render(120, 30, |f, a| draw_which_key(f, a, Side::Right));
+        let corner = |screen: &str| {
+            let row = screen.lines().find(|l| l.contains("Ctrl+B")).unwrap();
+            row.chars().position(|c| c == '╭').unwrap()
+        };
+        assert_eq!(corner(&left), 1);
+        assert!(corner(&right) > 30);
+    }
+
+    #[test]
+    fn settings_show_every_setting_with_its_value() {
+        let config = Config::default();
+        let screen = render(80, 20, |f, a| {
+            draw_settings(f, a, &config, 0, Some("saved"))
+        });
+        for setting in SETTINGS {
+            assert!(screen.contains(setting.name), "{} missing", setting.name);
+            assert!(screen.contains((setting.value)(&config)));
+        }
+        assert!(screen.contains("saved"));
     }
 
     #[test]
