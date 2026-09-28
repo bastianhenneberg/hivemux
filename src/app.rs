@@ -11,20 +11,20 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use ratatui::backend::CrosstermBackend;
-use ratatui::crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use ratatui::crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind};
 use ratatui::layout::{Constraint, Layout as UiLayout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Clear, Padding, Paragraph};
 use ratatui::{Frame, Terminal, TerminalOptions, Viewport};
 
+use crate::bindings::{self, Command};
 use crate::keys;
-use crate::layout::{Axis, Direction, Layout, MIN_PANE_SIZE, PaneId};
+use crate::layout::{Axis, Layout, MIN_PANE_SIZE, PaneId};
+use crate::menu::{self, HONEY};
 use crate::pane::Pane;
 use crate::protocol::{ClientMsg, ServerMsg};
 use crate::render::ScreenView;
-
-const HONEY: Color = Color::Rgb(250, 190, 0);
 
 /// How long after a repeatable command (focus, resize) another arrow key
 /// repeats it without pressing the prefix again. Same idea as tmux's
@@ -53,6 +53,8 @@ enum Mode {
     Repeat(Instant),
     /// A destructive action waits for the user to confirm it with `y`.
     Confirm(Action),
+    /// The key reference is shown, the next key closes it.
+    Help,
 }
 
 /// Actions that destroy something and are therefore confirmed first.
@@ -313,6 +315,10 @@ impl App {
                 self.mode = Mode::Normal;
                 self.command(key)
             }
+            Mode::Help => {
+                self.mode = Mode::Normal;
+                Ok(())
+            }
             Mode::Confirm(action) => {
                 self.mode = Mode::Normal;
                 if matches!(key.code, KeyCode::Char('y' | 'Y')) {
@@ -320,7 +326,10 @@ impl App {
                 }
                 Ok(())
             }
-            Mode::Repeat(until) if Instant::now() < until && arrow(key.code).is_some() => {
+            Mode::Repeat(until)
+                if Instant::now() < until
+                    && bindings::lookup(key).is_some_and(Command::repeatable) =>
+            {
                 self.command(key)
             }
             _ => {
@@ -341,38 +350,38 @@ impl App {
         }
     }
 
-    /// Runs the command bound to `key` after the prefix.
+    /// Runs the command bound to `key` after the prefix. Unbound keys just
+    /// end the prefix.
     fn command(&mut self, key: KeyEvent) -> Result<()> {
-        if is_prefix(key) {
+        let Some(command) = bindings::lookup(key) else {
+            return Ok(());
+        };
+        match command {
+            Command::SplitRow => self.split(Axis::Row),
+            Command::SplitColumn => self.split(Axis::Column),
+            Command::ClosePane => self.mode = Mode::Confirm(Action::ClosePane(self.focus)),
+            Command::NextPane => self.cycle_focus(),
+            Command::Focus(dir) => {
+                if let Some(next) = self.layout.neighbor(self.focus, dir, self.body) {
+                    self.focus = next;
+                }
+            }
+            Command::Resize(dir, cells) => {
+                self.layout.resize(self.focus, dir, cells, self.body);
+            }
+            Command::Detach => self.detach(),
+            Command::Quit => self.mode = Mode::Confirm(Action::KillServer),
+            Command::Help => self.mode = Mode::Help,
             // Prefix twice sends the prefix key itself to the pane.
-            if let Some(pane) = self.panes.get_mut(&self.focus) {
-                pane.write(&[0x02])?;
+            Command::SendPrefix => {
+                if let Some(pane) = self.panes.get_mut(&self.focus) {
+                    pane.write(&[0x02])?;
+                }
             }
-            return Ok(());
+            Command::Cancel => {}
         }
-
-        if let Some(dir) = arrow(key.code) {
-            if key.modifiers.contains(KeyModifiers::CONTROL) {
-                self.layout.resize(self.focus, dir, 1, self.body);
-            } else if key.modifiers.contains(KeyModifiers::ALT) {
-                self.layout.resize(self.focus, dir, 5, self.body);
-            } else if let Some(next) = self.layout.neighbor(self.focus, dir, self.body) {
-                self.focus = next;
-            }
+        if command.repeatable() {
             self.mode = Mode::Repeat(Instant::now() + REPEAT_TIME);
-            return Ok(());
-        }
-
-        match key.code {
-            // Like herdr, q detaches. Stopping the server and its shells
-            // takes `hivemux kill-server`, so no key can do it by accident.
-            KeyCode::Char('q' | 'd') => self.detach(),
-            KeyCode::Char('%') => self.split(Axis::Row),
-            KeyCode::Char('"') => self.split(Axis::Column),
-            KeyCode::Char('x') => self.mode = Mode::Confirm(Action::ClosePane(self.focus)),
-            KeyCode::Char('Q') => self.mode = Mode::Confirm(Action::KillServer),
-            KeyCode::Char('o') => self.cycle_focus(),
-            _ => {}
         }
         Ok(())
     }
@@ -488,7 +497,7 @@ impl App {
             let cursor = view.cursor(inner);
             frame.render_widget(view, inner);
             if focused
-                && !matches!(self.mode, Mode::Confirm(_))
+                && !matches!(self.mode, Mode::Confirm(_) | Mode::Help)
                 && let Some(position) = cursor
             {
                 frame.set_cursor_position(position);
@@ -497,8 +506,11 @@ impl App {
 
         frame.render_widget(self.status_line(), status_area);
 
-        if let Mode::Confirm(action) = self.mode {
-            self.draw_confirm(frame, body, action);
+        match self.mode {
+            Mode::Prefix => menu::draw_which_key(frame, body),
+            Mode::Help => menu::draw_help(frame, body),
+            Mode::Confirm(action) => self.draw_confirm(frame, body, action),
+            Mode::Normal | Mode::Repeat(_) => {}
         }
     }
 
@@ -569,9 +581,13 @@ impl App {
             Mode::Prefix => {
                 spans.push(Span::styled(" PREFIX ", badge));
                 spans.push(Span::styled(
-                    "  % split │  \" split ─  x close  o next  ←↑↓→ focus  ^←↑↓→ resize  q/d detach  Q quit",
+                    "  ? all keys · Esc cancel",
                     Style::new().fg(HONEY),
                 ));
+            }
+            Mode::Help => {
+                spans.push(Span::styled(" HELP ", badge));
+                spans.push(Span::styled("  any key closes", Style::new().fg(HONEY)));
             }
             Mode::Confirm(_) => {
                 spans.push(Span::styled(
@@ -596,7 +612,7 @@ impl App {
             Mode::Normal => {
                 spans.push(Span::styled(
                     format!(
-                        "{} {} · ^B % \" split · ^B q detach",
+                        "{} {} · ^B menu · ^B ? all keys",
                         self.panes.len(),
                         if self.panes.len() == 1 {
                             "pane"
@@ -625,17 +641,7 @@ fn centered(area: Rect, width: u16, height: u16) -> Rect {
 }
 
 fn is_prefix(key: KeyEvent) -> bool {
-    key.code == KeyCode::Char('b') && key.modifiers.contains(KeyModifiers::CONTROL)
-}
-
-fn arrow(code: KeyCode) -> Option<Direction> {
-    match code {
-        KeyCode::Left => Some(Direction::Left),
-        KeyCode::Right => Some(Direction::Right),
-        KeyCode::Up => Some(Direction::Up),
-        KeyCode::Down => Some(Direction::Down),
-        _ => None,
-    }
+    bindings::PREFIX.matches(key)
 }
 
 /// Panes on top, one line of status bar at the bottom.

@@ -1,0 +1,223 @@
+//! The key menus drawn from the binding table: the which-key popup shown
+//! while the prefix is active, and the full help overlay.
+
+use ratatui::Frame;
+use ratatui::layout::{Margin, Rect};
+use ratatui::style::{Color, Modifier, Style};
+use ratatui::text::{Line, Span};
+use ratatui::widgets::{Block, BorderType, Clear, Padding, Paragraph};
+
+use crate::bindings::{Binding, Group, PREFIX_LABEL, in_group};
+
+pub const HONEY: Color = Color::Rgb(250, 190, 0);
+
+/// Space between the key column and the description, and between groups.
+const GAP: usize = 2;
+const GROUP_GAP: usize = 4;
+
+/// The which-key popup in the bottom right corner of `area`.
+pub fn draw_which_key(frame: &mut Frame, area: Rect) {
+    let area = inset(area);
+    // Border and one column of padding on each side.
+    let lines = groups(usize::from(area.width).saturating_sub(4));
+
+    let width = lines.iter().map(Line::width).max().unwrap_or(0) as u16 + 4;
+    let height = lines.len() as u16 + 2;
+    let width = width.min(area.width);
+    let height = height.min(area.height);
+    let popup = Rect::new(area.right() - width, area.bottom() - height, width, height);
+
+    draw_box(frame, popup, format!(" ⬢ {PREFIX_LABEL} "), 1, lines);
+}
+
+/// The full key reference in the middle of `area`.
+pub fn draw_help(frame: &mut Frame, area: Rect) {
+    let area = inset(area);
+    let dim = Style::new().add_modifier(Modifier::DIM);
+    let mut lines = vec![
+        Line::from(vec![
+            Span::raw("Press "),
+            Span::styled(PREFIX_LABEL, key_style()),
+            Span::raw(", then one of these keys:"),
+        ]),
+        Line::default(),
+    ];
+    // Border and two columns of padding on each side.
+    lines.extend(groups(usize::from(area.width).saturating_sub(6)));
+    lines.extend([
+        Line::default(),
+        Line::styled("Focus and resize repeat: for a moment afterwards,", dim),
+        Line::styled("arrow keys work without the prefix.", dim),
+        Line::styled("`hivemux keys` prints this list in a shell.", dim),
+        Line::default(),
+        Line::from(vec![
+            Span::styled("any key", key_style()),
+            Span::raw(" close"),
+        ]),
+    ]);
+
+    let width = lines.iter().map(Line::width).max().unwrap_or(0) as u16 + 6;
+    let height = lines.len() as u16 + 2;
+    let width = width.min(area.width);
+    let height = height.min(area.height);
+    let popup = Rect::new(
+        area.x + (area.width - width) / 2,
+        area.y + (area.height - height) / 2,
+        width,
+        height,
+    );
+
+    draw_box(frame, popup, " ⬢ hivemux keys ".into(), 2, lines);
+}
+
+/// `area` minus one cell on each side, so popups leave the pane borders
+/// around them visible.
+fn inset(area: Rect) -> Rect {
+    area.inner(Margin::new(1, 1))
+}
+
+fn draw_box(
+    frame: &mut Frame,
+    popup: Rect,
+    title: String,
+    padding: u16,
+    lines: Vec<Line<'static>>,
+) {
+    let block = Block::bordered()
+        .border_type(BorderType::Rounded)
+        .border_style(Style::new().fg(HONEY))
+        .title(Span::styled(title, key_style()))
+        .padding(Padding::horizontal(padding));
+    frame.render_widget(Clear, popup);
+    frame.render_widget(Paragraph::new(lines).block(block), popup);
+}
+
+/// All groups, side by side when they fit into `max_width`, stacked
+/// otherwise.
+fn groups(max_width: usize) -> Vec<Line<'static>> {
+    let columns: Vec<Vec<Line>> = Group::ALL.iter().map(|&g| group_lines(g)).collect();
+    let widths: Vec<usize> = columns
+        .iter()
+        .map(|lines| lines.iter().map(Line::width).max().unwrap_or(0))
+        .collect();
+    let side_by_side = widths.iter().sum::<usize>() + GROUP_GAP * (widths.len() - 1);
+    if side_by_side <= max_width {
+        beside(columns, &widths)
+    } else {
+        stacked(columns)
+    }
+}
+
+fn key_style() -> Style {
+    Style::new().fg(HONEY).add_modifier(Modifier::BOLD)
+}
+
+/// A group's title followed by one line per binding, keys aligned.
+fn group_lines(group: Group) -> Vec<Line<'static>> {
+    let bindings: Vec<&Binding> = in_group(group).collect();
+    let key_width = bindings
+        .iter()
+        .map(|b| b.label.chars().count())
+        .max()
+        .unwrap_or(0);
+
+    let mut lines = vec![Line::styled(
+        group.title(),
+        Style::new().add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
+    )];
+    for binding in bindings {
+        let pad = key_width - binding.label.chars().count() + GAP;
+        lines.push(Line::from(vec![
+            Span::styled(binding.label, key_style()),
+            Span::raw(" ".repeat(pad)),
+            Span::raw(binding.description),
+        ]));
+    }
+    lines
+}
+
+/// Joins columns of lines side by side, padding each column to its width.
+fn beside(columns: Vec<Vec<Line<'static>>>, widths: &[usize]) -> Vec<Line<'static>> {
+    let rows = columns.iter().map(Vec::len).max().unwrap_or(0);
+    (0..rows)
+        .map(|row| {
+            let mut spans = Vec::new();
+            for (i, column) in columns.iter().enumerate() {
+                let line = column.get(row).cloned().unwrap_or_default();
+                let pad = widths[i] - line.width();
+                spans.extend(line.spans);
+                if i + 1 < columns.len() {
+                    spans.push(Span::raw(" ".repeat(pad + GROUP_GAP)));
+                }
+            }
+            Line::from(spans)
+        })
+        .collect()
+}
+
+fn stacked(columns: Vec<Vec<Line<'static>>>) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+    for (i, column) in columns.into_iter().enumerate() {
+        if i > 0 {
+            lines.push(Line::default());
+        }
+        lines.extend(column);
+    }
+    lines
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    fn render(width: u16, height: u16, draw: fn(&mut Frame, Rect)) -> String {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal.draw(|frame| draw(frame, frame.area())).unwrap();
+        let buffer = terminal.backend().buffer();
+        (0..height)
+            .map(|y| {
+                (0..width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn which_key_fits_side_by_side_on_a_wide_screen() {
+        let screen = render(120, 30, draw_which_key);
+        let row = screen
+            .lines()
+            .find(|l| l.contains("Panes"))
+            .expect("Panes header");
+        assert!(row.contains("Navigate") && row.contains("Session"));
+        assert!(screen.contains("split side by side"));
+        assert!(screen.contains("quit hivemux"));
+    }
+
+    #[test]
+    fn which_key_stacks_on_a_narrow_screen() {
+        let screen = render(40, 40, draw_which_key);
+        let row = screen
+            .lines()
+            .find(|l| l.contains("Panes"))
+            .expect("Panes header");
+        assert!(!row.contains("Navigate"));
+        assert!(screen.contains("Navigate") && screen.contains("Session"));
+    }
+
+    #[test]
+    fn help_lists_every_binding() {
+        let screen = render(100, 40, draw_help);
+        for binding in crate::bindings::BINDINGS {
+            assert!(
+                screen.contains(binding.description),
+                "{} missing",
+                binding.description
+            );
+        }
+    }
+}

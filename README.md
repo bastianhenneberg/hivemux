@@ -35,6 +35,7 @@ cargo build --release
 ./target/release/hivemux            # attach to the session, or start one
 ./target/release/hivemux attach     # attach, fail if there is no session
 ./target/release/hivemux kill-server  # stop the server and every shell in it
+./target/release/hivemux keys         # list the key bindings
 ```
 
 The first `hivemux` starts a server in the background. It owns the shells and keeps them
@@ -52,8 +53,10 @@ a time, attaching from a second terminal detaches the first.
 | `Ctrl+B` `Ctrl+←↑↓→` | Resize by one cell (`Alt` for five) |
 | `Ctrl+B` `q` or `d` | Detach, the shells keep running |
 | `Ctrl+B` `Q` | Quit: end the session and every shell in it (asks first) |
+| `Ctrl+B` `?` | Show all keys |
 | `Ctrl+B` `Ctrl+B` | Send `Ctrl+B` to the shell |
 
+Pressing `Ctrl+B` opens a menu with every key, like which-key in Neovim.
 Focus and resize repeat: for 600 ms after one of them, arrow keys work without the prefix.
 A pane closes when its shell exits, hivemux exits with the last pane.
 

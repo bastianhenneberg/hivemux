@@ -1,7 +1,9 @@
 mod app;
+mod bindings;
 mod client;
 mod keys;
 mod layout;
+mod menu;
 mod pane;
 mod protocol;
 mod render;
@@ -16,6 +18,7 @@ Commands:
   (none)        attach to the running session, or start a new one
   attach        attach to the running session
   kill-server   shut down the server and every pane in it
+  keys          list the key bindings
   help          show this help
 
 Inside hivemux, press Ctrl+B then q (or d) to detach. The shells keep running.
@@ -32,6 +35,10 @@ fn main() -> Result<()> {
         [] => client::run(true),
         ["attach" | "a"] => client::run(false),
         ["kill-server"] => client::kill_server(),
+        ["keys"] => {
+            print!("{}", bindings::reference());
+            Ok(())
+        }
         ["server"] => server::run(),
         ["help" | "-h" | "--help"] => {
             println!("{USAGE}");
