@@ -5,7 +5,8 @@ A terminal multiplexer and window manager for humans and their coding agents, wr
 hivemux combines tiling and floating windows with a tmux-style prefix, and keeps an eye on
 the agents running in its panes: working, blocked, or idle.
 
-> **Status:** just getting started. Nothing usable yet.
+> **Status:** early prototype. hivemux runs your shell in a single pane, including full-screen
+> programs like nvim. Everything else on the roadmap is still to come.
 
 ## Ideas
 
@@ -19,7 +20,7 @@ Inspired by [TUIOS](https://github.com/Gaurav-Gosain/tuios) and [herdr](https://
 
 ## Roadmap
 
-1. One shell in one pane (PTY → VT emulation → rendering)
+1. ~~One shell in one pane (PTY → VT emulation → rendering)~~ ✓
 2. Splits with a BSP tree, focus, resize, prefix keys
 3. Server/client split with detach and reattach
 4. Floating windows and workspaces
@@ -30,8 +31,15 @@ Inspired by [TUIOS](https://github.com/Gaurav-Gosain/tuios) and [herdr](https://
 ## Build
 
 ```bash
-cargo build --release
+cargo run --release
 ```
+
+| Key | Action |
+|---|---|
+| `Ctrl+B` `q` | Quit |
+| `Ctrl+B` `Ctrl+B` | Send `Ctrl+B` to the shell |
+
+hivemux also exits when the shell exits.
 
 ## License
 
