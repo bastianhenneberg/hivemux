@@ -30,6 +30,7 @@ pub enum Command {
     PrevWorkspace,
     NextFloat,
     RenamePane,
+    Sessions,
     PickPane,
     ReloadConfig,
     ScrollbackEditor,
@@ -385,6 +386,12 @@ pub const BINDINGS: &[Binding] = &[
         description: "into the sidebar",
         group: Group::Navigate,
         keys: &[(Key::plain(Char('e')), C::FocusSidebar)],
+    },
+    Binding {
+        label: "S",
+        description: "sessions…",
+        group: Group::Session,
+        keys: &[(Key::plain(Char('S')), C::Sessions)],
     },
     Binding {
         label: "c",

@@ -91,6 +91,9 @@ pub enum ServerMsg {
     Exited,
     /// The answer to a `ClientMsg::Request`.
     Reply(Reply),
+    /// Leave this server and attach to the session with this name instead,
+    /// starting it if needed.
+    Switch(String),
 }
 
 impl ClientMsg {
@@ -125,6 +128,7 @@ impl ServerMsg {
             ServerMsg::Detached => write_frame(w, 2, &[]),
             ServerMsg::Exited => write_frame(w, 3, &[]),
             ServerMsg::Reply(reply) => write_frame(w, 4, &serde_json::to_vec(reply)?),
+            ServerMsg::Switch(name) => write_frame(w, 5, name.as_bytes()),
         }
     }
 
@@ -138,6 +142,9 @@ impl ServerMsg {
             2 => Ok(Some(ServerMsg::Detached)),
             3 => Ok(Some(ServerMsg::Exited)),
             4 => Ok(Some(ServerMsg::Reply(serde_json::from_slice(&payload)?))),
+            5 => Ok(Some(ServerMsg::Switch(
+                String::from_utf8(payload).map_err(|e| invalid(e.to_string()))?,
+            ))),
             _ => Err(invalid(format!("unknown server message {tag}"))),
         }
     }
@@ -173,14 +180,29 @@ fn invalid(msg: String) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, msg)
 }
 
-/// The server socket: `$HIVEMUX_SOCKET` if set, otherwise
-/// `$XDG_RUNTIME_DIR/hivemux/default.sock`, falling back to
-/// `/tmp/hivemux-<uid>/default.sock`. Creates the directory, readable only by
-/// the current user.
-pub fn socket_path() -> Result<PathBuf> {
-    if let Some(path) = std::env::var_os("HIVEMUX_SOCKET") {
-        return Ok(PathBuf::from(path));
-    }
+/// The session this process belongs to: `$HIVEMUX_SESSION`, set by
+/// `hivemux -s NAME`, or `default`.
+pub fn session_name() -> String {
+    std::env::var("HIVEMUX_SESSION")
+        .ok()
+        .filter(|name| valid_session_name(name))
+        .unwrap_or_else(|| DEFAULT_SESSION.to_owned())
+}
+
+pub const DEFAULT_SESSION: &str = "default";
+
+/// Session names become file names: letters, digits, `-` and `_`.
+pub fn valid_session_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 32
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
+/// Where the sockets live: `$XDG_RUNTIME_DIR/hivemux`, falling back to
+/// `/tmp/hivemux-<uid>`. Created readable only by the current user.
+pub fn runtime_dir() -> Result<PathBuf> {
     let dir = match std::env::var_os("XDG_RUNTIME_DIR") {
         Some(runtime) => PathBuf::from(runtime).join("hivemux"),
         // SAFETY: getuid has no preconditions and cannot fail.
@@ -192,7 +214,47 @@ pub fn socket_path() -> Result<PathBuf> {
         .create(&dir)
         .with_context(|| format!("failed to create {}", dir.display()))?;
     fs::set_permissions(&dir, fs::Permissions::from_mode(0o700))?;
-    Ok(dir.join("default.sock"))
+    Ok(dir)
+}
+
+/// The socket of session `name`.
+pub fn session_socket(name: &str) -> Result<PathBuf> {
+    Ok(runtime_dir()?.join(format!("{name}.sock")))
+}
+
+/// The server socket: `$HIVEMUX_SOCKET` if set, otherwise the socket of this
+/// process's session in the runtime directory.
+pub fn socket_path() -> Result<PathBuf> {
+    if let Some(path) = std::env::var_os("HIVEMUX_SOCKET") {
+        return Ok(PathBuf::from(path));
+    }
+    session_socket(&session_name())
+}
+
+/// The sessions with a server running, by name, sorted.
+pub fn sessions() -> Vec<String> {
+    let Ok(dir) = runtime_dir() else {
+        return Vec::new();
+    };
+    let Ok(entries) = fs::read_dir(&dir) else {
+        return Vec::new();
+    };
+    let mut names: Vec<String> = entries
+        .flatten()
+        .filter_map(|entry| {
+            let path = entry.path();
+            let name = path
+                .file_name()?
+                .to_str()?
+                .strip_suffix(".sock")?
+                .to_owned();
+            // A socket without a server behind it is left over from a crash.
+            std::os::unix::net::UnixStream::connect(&path).ok()?;
+            Some(name)
+        })
+        .collect();
+    names.sort();
+    names
 }
 
 #[cfg(test)]
@@ -243,6 +305,7 @@ mod tests {
             ServerMsg::Exited,
             ServerMsg::Reply(Ok(serde_json::json!({"pane": 4}))),
             ServerMsg::Reply(Err("no pane 9".into())),
+            ServerMsg::Switch("work".into()),
         ];
         let mut wire = Vec::new();
         for msg in &msgs {
@@ -253,6 +316,15 @@ mod tests {
             assert_eq!(ServerMsg::read_from(&mut r).unwrap(), Some(msg));
         }
         assert_eq!(ServerMsg::read_from(&mut r).unwrap(), None);
+    }
+
+    #[test]
+    fn session_names_are_safe_file_names() {
+        assert!(valid_session_name("work"));
+        assert!(valid_session_name("side-project_2"));
+        assert!(!valid_session_name(""));
+        assert!(!valid_session_name("../x"));
+        assert!(!valid_session_name("a b"));
     }
 
     #[test]

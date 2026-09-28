@@ -21,12 +21,15 @@ mod workspace;
 use anyhow::{Result, bail};
 
 const USAGE: &str = "\
-Usage: hivemux [command]
+Usage: hivemux [-s NAME] [command]
+
+-s NAME picks a session other than `default`, e.g. `hivemux -s work`.
 
 Commands:
-  (none)        attach to the running session, or start a new one
-  attach        attach to the running session
-  kill-server   shut down the server and every pane in it
+  (none)        attach to the session, or start it
+  attach        attach to the session (`attach -t NAME` works too)
+  ls            list the running sessions
+  kill-server   shut down the session's server and every pane in it
   keys          list the key bindings
 
 For scripts and agents:
@@ -48,7 +51,27 @@ Inside hivemux, Ctrl+B then q opens the quit menu: detach, close the pane or end
 session. Ctrl+B then d detaches right away, the shells keep running.";
 
 fn main() -> Result<()> {
-    let args: Vec<String> = std::env::args().skip(1).collect();
+    let mut args: Vec<String> = std::env::args().skip(1).collect();
+    // `-s NAME` anywhere, or `attach -t NAME` as in tmux, picks the session.
+    if let Some(i) = args.iter().position(|a| {
+        a == "-s"
+            || a == "--session"
+            || (a == "-t" && args.first().is_some_and(|c| c == "attach" || c == "a"))
+    }) {
+        let Some(name) = args.get(i + 1).cloned() else {
+            bail!("{} needs a session name", args[i]);
+        };
+        if !protocol::valid_session_name(&name) {
+            bail!("{name:?} is no session name: letters, digits, - and _ only");
+        }
+        args.drain(i..=i + 1);
+        // SAFETY: nothing else runs yet, no thread can read the
+        // environment while it changes.
+        unsafe {
+            std::env::set_var("HIVEMUX_SESSION", &name);
+            std::env::remove_var("HIVEMUX_SOCKET");
+        }
+    }
     match args
         .iter()
         .map(String::as_str)
@@ -58,6 +81,7 @@ fn main() -> Result<()> {
         [] => client::run(true),
         ["attach" | "a"] => client::run(false),
         ["kill-server"] => client::kill_server(),
+        ["ls"] => cli::ls(),
         ["keys"] => {
             print!("{}", bindings::reference());
             Ok(())

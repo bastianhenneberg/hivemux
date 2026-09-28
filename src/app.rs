@@ -29,7 +29,7 @@ use crate::layout::{Axis, MIN_PANE_SIZE, PaneId};
 use crate::menu;
 use crate::pane::{Pane, Spawn};
 use crate::persist::{self, Saved, SavedPane};
-use crate::protocol::{ClientMsg, RenameTarget, Reply, Request, ServerMsg};
+use crate::protocol::{self, ClientMsg, RenameTarget, Reply, Request, ServerMsg};
 use crate::render::ScreenView;
 use crate::sidebar::{self, state_style};
 use crate::theme;
@@ -82,6 +82,8 @@ enum Mode {
     Sidebar(usize),
     /// The pane picker is open, see `App::picker`.
     Picker,
+    /// The session switcher is open with the given entry selected.
+    Sessions(usize),
 }
 
 /// The pane picker: every pane in every workspace, filtered by what is
@@ -113,6 +115,8 @@ enum PromptFor {
     Search {
         forward: bool,
     },
+    /// The name of a session to start and switch to.
+    NewSession,
 }
 
 /// A mouse drag in progress.
@@ -1081,6 +1085,10 @@ impl App {
                 self.picker_key(key);
                 Ok(())
             }
+            Mode::Sessions(selected) => {
+                self.sessions_key(key, selected);
+                Ok(())
+            }
             Mode::Confirm(action) => {
                 self.mode = Mode::Normal;
                 if matches!(key.code, KeyCode::Char('y' | 'Y')) {
@@ -1153,6 +1161,14 @@ impl App {
             Command::JumpToWaiting => self.jump_to_waiting(),
             Command::RenamePane => self.start_prompt(RenameTarget::Pane(self.ws.focus)),
             Command::Zoom => self.ws.toggle_zoom(),
+            Command::Sessions => {
+                let current = protocol::session_name();
+                let selected = protocol::sessions()
+                    .iter()
+                    .position(|s| *s == current)
+                    .unwrap_or(0);
+                self.mode = Mode::Sessions(selected);
+            }
             Command::PickPane => {
                 self.picker = Some(Picker {
                     query: String::new(),
@@ -1733,7 +1749,7 @@ impl App {
             return None;
         }
         let mut x = if bars.control() == side {
-            BADGE.chars().count() as u16 + 1
+            badge_text().chars().count() as u16 + 1
         } else {
             0
         };
@@ -1806,6 +1822,80 @@ impl App {
                     })
             })
             .collect()
+    }
+
+    /// The switcher's entries: every running session, then a new one.
+    fn session_items(&self) -> (Vec<String>, Vec<menu::MenuItem>) {
+        let current = protocol::session_name();
+        let names = protocol::sessions();
+        let mut items: Vec<menu::MenuItem> = names
+            .iter()
+            .enumerate()
+            .map(|(i, name)| menu::MenuItem {
+                key: char::from_digit((i as u32 + 1) % 10, 10).unwrap_or(' '),
+                title: name.clone(),
+                hint: if *name == current {
+                    "this session".into()
+                } else {
+                    String::new()
+                },
+                danger: false,
+            })
+            .collect();
+        items.push(menu::MenuItem {
+            key: 'n',
+            title: "new session…".into(),
+            hint: "`hivemux -s NAME` does the same".into(),
+            danger: false,
+        });
+        (names, items)
+    }
+
+    /// The session switcher: arrows or j/k choose, Enter or the digit
+    /// switches, n starts a new session.
+    fn sessions_key(&mut self, key: KeyEvent, selected: usize) {
+        let (names, items) = self.session_items();
+        let count = items.len();
+        let pick = match key.code {
+            KeyCode::Esc | KeyCode::Char('q') => {
+                self.mode = Mode::Normal;
+                return;
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                self.mode = Mode::Sessions((selected + count - 1) % count);
+                return;
+            }
+            KeyCode::Down | KeyCode::Char('j') | KeyCode::Tab => {
+                self.mode = Mode::Sessions((selected + 1) % count);
+                return;
+            }
+            KeyCode::Enter => selected,
+            KeyCode::Char('n') => count - 1,
+            KeyCode::Char(c) => match items.iter().position(|item| item.key == c) {
+                Some(i) => i,
+                None => return,
+            },
+            _ => return,
+        };
+        self.mode = Mode::Normal;
+        match names.get(pick) {
+            Some(name) if *name == protocol::session_name() => {}
+            Some(name) => self.switch_session(name.clone()),
+            None => {
+                self.prompt = Some(Prompt {
+                    purpose: PromptFor::NewSession,
+                    text: String::new(),
+                });
+                self.mode = Mode::Prompt;
+            }
+        }
+    }
+
+    /// Sends the client on to session `name`; it starts it if needed.
+    fn switch_session(&mut self, name: String) {
+        if let Some(mut client) = self.client.take() {
+            let _ = client.send(&ServerMsg::Switch(name));
+        }
     }
 
     /// Typing filters, arrows or Ctrl-N/P move, Enter goes to the pane.
@@ -2039,6 +2129,14 @@ impl App {
                         let name = Some(text).filter(|t| !t.trim().is_empty());
                         if let Err(e) = self.rename(target, name) {
                             self.flash = Some(e);
+                        }
+                    }
+                    PromptFor::NewSession => {
+                        let name = text.trim().to_owned();
+                        if protocol::valid_session_name(&name) {
+                            self.switch_session(name);
+                        } else {
+                            self.flash = Some("session names use letters, digits, - and _".into());
                         }
                     }
                     PromptFor::Search { forward } => {
@@ -2517,6 +2615,7 @@ impl App {
                         | Mode::Prompt
                         | Mode::Sidebar(_)
                         | Mode::Picker
+                        | Mode::Sessions(_)
                 )
                 && (self.mode != Mode::Copy || copy_cursor.is_some())
                 && let Some(position) = cursor
@@ -2561,6 +2660,10 @@ impl App {
             Mode::Confirm(action) => self.draw_confirm(frame, body, action),
             Mode::Prompt => self.draw_prompt(frame, body),
             Mode::Picker => self.draw_picker(frame, body),
+            Mode::Sessions(selected) => {
+                let (_, items) = self.session_items();
+                menu::draw_choices(frame, body, " ⬢ Sessions ", &items, selected);
+            }
             Mode::Prefix(_) | Mode::Normal | Mode::Repeat(..) | Mode::Copy | Mode::Sidebar(_) => {}
         }
     }
@@ -2603,6 +2706,7 @@ impl App {
             PromptFor::Rename(RenameTarget::Workspace(n)) => format!(" Name workspace {n} "),
             PromptFor::Search { forward: true } => " Search down ".to_owned(),
             PromptFor::Search { forward: false } => " Search up ".to_owned(),
+            PromptFor::NewSession => " New session ".to_owned(),
         };
         let accent = theme::current().accent;
         let hint = Style::new().add_modifier(Modifier::DIM);
@@ -2616,6 +2720,7 @@ impl App {
                 match prompt.purpose {
                     PromptFor::Rename(_) => "Enter save · empty clears the name · Esc cancel",
                     PromptFor::Search { .. } => "Enter find · then n next, N previous · Esc cancel",
+                    PromptFor::NewSession => "Enter start and switch · letters, digits, - and _",
                 },
                 hint,
             ),
@@ -2705,7 +2810,7 @@ impl App {
 
         let mut spans = Vec::new();
         if control {
-            spans.push(Span::styled(BADGE, badge_style()));
+            spans.push(Span::styled(badge_text(), badge_style()));
             spans.push(Span::raw(" "));
         }
         if bars.tabs == side {
@@ -2814,6 +2919,13 @@ impl App {
                 spans.push(Span::styled(" SETTINGS ", badge));
                 spans.push(Span::styled(
                     "  ↑↓ select · ←→ Enter change · Esc close",
+                    Style::new().fg(theme::current().accent),
+                ));
+            }
+            Mode::Sessions(_) => {
+                spans.push(Span::styled(" SESSIONS ", badge));
+                spans.push(Span::styled(
+                    "  ↑↓ choose · Enter switch · n new · Esc cancel",
                     Style::new().fg(theme::current().accent),
                 ));
             }
@@ -2970,7 +3082,15 @@ fn screen_layout(screen: Rect, bars: &Bars) -> ScreenLayout {
     }
 }
 
-const BADGE: &str = " ⬢ hivemux ";
+/// ` ⬢ hivemux `, or the session's name for a named one.
+fn badge_text() -> String {
+    let name = protocol::session_name();
+    if name == protocol::DEFAULT_SESSION {
+        " ⬢ hivemux ".to_owned()
+    } else {
+        format!(" ⬢ {name} ")
+    }
+}
 
 /// The panes' area and the sidebar's, if it is on and there is room for it
 /// next to panes at least as wide.

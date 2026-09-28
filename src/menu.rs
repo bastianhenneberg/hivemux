@@ -171,6 +171,17 @@ pub struct MenuItem {
 
 /// The quit menu in the middle of `area`, `selected` highlighted.
 pub fn draw_quit_menu(frame: &mut Frame, area: Rect, items: &[MenuItem], selected: usize) {
+    draw_choices(frame, area, " ⬢ Quit hivemux? ", items, selected);
+}
+
+/// A menu of `items` in the middle of `area`, `selected` highlighted.
+pub fn draw_choices(
+    frame: &mut Frame,
+    area: Rect,
+    title: &str,
+    items: &[MenuItem],
+    selected: usize,
+) {
     let area = inset(area);
     let title_width = items
         .iter()
@@ -233,7 +244,7 @@ pub fn draw_quit_menu(frame: &mut Frame, area: Rect, items: &[MenuItem], selecte
         width,
         height,
     );
-    draw_box(frame, popup, " ⬢ Quit hivemux? ".into(), 2, lines);
+    draw_box(frame, popup, title.into(), 2, lines);
 }
 
 /// The settings menu in the middle of `area`. `note` is shown below the

@@ -36,12 +36,18 @@ cargo build --release
 ./target/release/hivemux attach     # attach, fail if there is no session
 ./target/release/hivemux kill-server  # stop the server and every shell in it
 ./target/release/hivemux keys         # list the key bindings
+./target/release/hivemux -s work      # the session `work`, started if needed
+./target/release/hivemux ls           # the running sessions with panes and agents
 ```
 
 The first `hivemux` starts a server in the background. It owns the shells and keeps them
 running after you detach or close the terminal. The socket lives in
 `$XDG_RUNTIME_DIR/hivemux/`, set `HIVEMUX_SOCKET` to use another one. One client is attached at
 a time, attaching from a second terminal detaches the first.
+
+Sessions are separate servers with their own panes, socket and saved layout. `hivemux -s NAME`
+(or `attach -t NAME`) picks one, `Ctrl+B S` switches between them without leaving the terminal,
+and named sessions show their name in the control bar.
 
 | Key | Action |
 |---|---|
@@ -71,6 +77,7 @@ a time, attaching from a second terminal detaches the first.
 | `Ctrl+B` `Q` | Quit: end the session and every shell in it (asks first) |
 | `Ctrl+B` `b` | Show or hide the sidebar |
 | `Ctrl+B` `e` | Into the sidebar: `j`/`k` move, `Enter` go, `r` name, `x` close, `Esc` back |
+| `Ctrl+B` `S` | Sessions: switch to another one or start a new one |
 | `Ctrl+B` `,` | Settings |
 | `Ctrl+B` `R` | Reload the config file |
 | `Ctrl+B` `?` | Show all keys |

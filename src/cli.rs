@@ -8,7 +8,7 @@ use anyhow::{Context, Result, bail};
 use crate::agent::AgentState;
 use crate::client;
 use crate::layout::PaneId;
-use crate::protocol::{RenameTarget, Request};
+use crate::protocol::{self, RenameTarget, Request};
 
 /// `hivemux status <working|blocked|idle|clear> [--pane N]`
 ///
@@ -70,6 +70,49 @@ fn ignore_hook(hook: &serde_json::Value, state: Option<AgentState>) -> bool {
     }
     let subagent = hook.get("agent_id").is_some_and(|id| !id.is_null());
     subagent && matches!(state, Some(AgentState::Idle) | None)
+}
+
+/// `hivemux ls`: the running sessions with their panes and agents.
+pub fn ls() -> Result<()> {
+    let current = protocol::session_name();
+    let names = protocol::sessions();
+    if names.is_empty() {
+        println!("no sessions running");
+        return Ok(());
+    }
+    for name in names {
+        let path = protocol::session_socket(&name)?;
+        let marker = if name == current { "*" } else { " " };
+        let Ok(panes) = client::request_at(&path, Request::List) else {
+            println!("{marker} {name:<16} (not answering)");
+            continue;
+        };
+        let panes = panes.as_array().cloned().unwrap_or_default();
+        let mut workspaces: Vec<u64> = panes
+            .iter()
+            .filter_map(|p| p["workspace"].as_u64())
+            .collect();
+        workspaces.sort_unstable();
+        workspaces.dedup();
+        let mut agents = String::new();
+        for state in [
+            AgentState::Blocked,
+            AgentState::Done,
+            AgentState::Working,
+            AgentState::Idle,
+        ] {
+            let count = panes.iter().filter(|p| p["state"] == state.name()).count();
+            if count > 0 {
+                agents.push_str(&format!("  {} {count} {}", state.symbol(), state.name()));
+            }
+        }
+        println!(
+            "{marker} {name:<16} {} panes in {} workspaces{agents}",
+            panes.len(),
+            workspaces.len()
+        );
+    }
+    Ok(())
 }
 
 /// `hivemux list [--json]`

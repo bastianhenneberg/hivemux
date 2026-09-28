@@ -76,7 +76,8 @@ impl SavedPane {
 
 /// Where the session is saved: `$HIVEMUX_STATE`, else next to a socket set
 /// with `$HIVEMUX_SOCKET` (so test servers keep their own), else
-/// `$XDG_STATE_HOME/hivemux/session.json`, falling back to `~/.local/state`.
+/// `$XDG_STATE_HOME/hivemux/session.json` for the default session and
+/// `<name>.json` for named ones, falling back to `~/.local/state`.
 /// Not the runtime directory of the socket, that one is gone after a reboot.
 pub fn path() -> Result<PathBuf> {
     if let Some(path) = std::env::var_os("HIVEMUX_STATE") {
@@ -91,7 +92,13 @@ pub fn path() -> Result<PathBuf> {
             PathBuf::from(std::env::var_os("HOME").context("HOME is not set")?).join(".local/state")
         }
     };
-    Ok(base.join("hivemux").join("session.json"))
+    let name = crate::protocol::session_name();
+    let file = if name == crate::protocol::DEFAULT_SESSION {
+        "session.json".to_owned()
+    } else {
+        format!("{name}.json")
+    };
+    Ok(base.join("hivemux").join(file))
 }
 
 pub fn to_json(saved: &Saved) -> Result<String> {
