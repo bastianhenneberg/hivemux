@@ -30,6 +30,7 @@ pub enum Command {
     PrevWorkspace,
     NextFloat,
     RenamePane,
+    PickPane,
     ReloadConfig,
     ScrollbackEditor,
     Zoom,
@@ -298,6 +299,12 @@ pub const BINDINGS: &[Binding] = &[
         description: "waiting/done agent",
         group: Group::Navigate,
         keys: &[(Key::plain(Char('a')), C::JumpToWaiting)],
+    },
+    Binding {
+        label: "g",
+        description: "go to any pane…",
+        group: Group::Navigate,
+        keys: &[(Key::plain(Char('g')), C::PickPane)],
     },
     Binding {
         label: ";",

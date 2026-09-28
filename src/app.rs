@@ -80,6 +80,24 @@ enum Mode {
     Prompt,
     /// The sidebar has the keyboard, the given clickable row is selected.
     Sidebar(usize),
+    /// The pane picker is open, see `App::picker`.
+    Picker,
+}
+
+/// The pane picker: every pane in every workspace, filtered by what is
+/// typed.
+struct Picker {
+    query: String,
+    selected: usize,
+}
+
+/// One pane in the picker.
+struct PickerEntry {
+    pane: PaneId,
+    workspace: u8,
+    label: String,
+    state: Option<AgentState>,
+    dir: String,
 }
 
 /// A line of text being typed.
@@ -256,6 +274,7 @@ pub struct App {
     /// the next key.
     flash: Option<String>,
     prompt: Option<Prompt>,
+    picker: Option<Picker>,
     /// The last copy mode search and its direction, for n and N.
     search: Option<(String, bool)>,
     /// When and where the left button went down last, to spot double clicks.
@@ -308,6 +327,7 @@ impl App {
             copy: None,
             flash: None,
             prompt: None,
+            picker: None,
             search: None,
             last_click: None,
             window_title: String::new(),
@@ -1057,6 +1077,10 @@ impl App {
                 self.sidebar_key(key, selected);
                 Ok(())
             }
+            Mode::Picker => {
+                self.picker_key(key);
+                Ok(())
+            }
             Mode::Confirm(action) => {
                 self.mode = Mode::Normal;
                 if matches!(key.code, KeyCode::Char('y' | 'Y')) {
@@ -1129,6 +1153,13 @@ impl App {
             Command::JumpToWaiting => self.jump_to_waiting(),
             Command::RenamePane => self.start_prompt(RenameTarget::Pane(self.ws.focus)),
             Command::Zoom => self.ws.toggle_zoom(),
+            Command::PickPane => {
+                self.picker = Some(Picker {
+                    query: String::new(),
+                    selected: 0,
+                });
+                self.mode = Mode::Picker;
+            }
             Command::ReloadConfig => {
                 let (config, error) = Config::load();
                 self.config = config;
@@ -1734,6 +1765,166 @@ impl App {
         }
     }
 
+    /// Every pane matching the picker's query: workspace, name, program,
+    /// state and directory are searched, words in any order.
+    fn picker_entries(&self, query: &str) -> Vec<PickerEntry> {
+        let words: Vec<String> = query.split_whitespace().map(str::to_lowercase).collect();
+        let mut all: Vec<(u8, PaneId)> = Vec::new();
+        for n in self.workspaces() {
+            if let Some(ws) = self.workspace_ref(n) {
+                all.extend(ws.panes().into_iter().map(|id| (n, id)));
+            }
+        }
+        all.into_iter()
+            .filter_map(|(n, id)| {
+                let pane = self.panes.get(&id)?;
+                let program = pane.program().unwrap_or_default();
+                let label = match &pane.name {
+                    Some(name) => format!("{name} ({program})"),
+                    None => program,
+                };
+                let dir = pane.cwd().map(|c| tilde(&c)).unwrap_or_default();
+                let state = self.shown_state(id);
+                let ws_name = self
+                    .workspace_ref(n)
+                    .and_then(|w| w.name.clone())
+                    .unwrap_or_default();
+                let haystack = format!(
+                    "{n} {ws_name} {id} {label} {} {dir}",
+                    state.map(AgentState::name).unwrap_or_default()
+                )
+                .to_lowercase();
+                words
+                    .iter()
+                    .all(|w| haystack.contains(w))
+                    .then_some(PickerEntry {
+                        pane: id,
+                        workspace: n,
+                        label,
+                        state,
+                        dir,
+                    })
+            })
+            .collect()
+    }
+
+    /// Typing filters, arrows or Ctrl-N/P move, Enter goes to the pane.
+    fn picker_key(&mut self, key: KeyEvent) {
+        let Some(picker) = &mut self.picker else {
+            self.mode = Mode::Normal;
+            return;
+        };
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        match key.code {
+            KeyCode::Esc => {
+                self.picker = None;
+                self.mode = Mode::Normal;
+            }
+            KeyCode::Enter => {
+                let query = picker.query.clone();
+                let selected = picker.selected;
+                self.picker = None;
+                self.mode = Mode::Normal;
+                if let Some(entry) = self.picker_entries(&query).get(selected) {
+                    let id = entry.pane;
+                    self.reveal(id);
+                }
+            }
+            KeyCode::Down | KeyCode::Tab => picker.selected += 1,
+            KeyCode::Char('n' | 'j') if ctrl => picker.selected += 1,
+            KeyCode::Up | KeyCode::BackTab => picker.selected = picker.selected.saturating_sub(1),
+            KeyCode::Char('p' | 'k') if ctrl => picker.selected = picker.selected.saturating_sub(1),
+            KeyCode::Char('u' | 'w') if ctrl => {
+                picker.query.clear();
+                picker.selected = 0;
+            }
+            KeyCode::Backspace => {
+                picker.query.pop();
+                picker.selected = 0;
+            }
+            KeyCode::Char(c) if !ctrl => {
+                picker.query.push(c);
+                picker.selected = 0;
+            }
+            _ => {}
+        }
+        // Keep the selection on an entry.
+        if let Some(picker) = &self.picker {
+            let count = self.picker_entries(&picker.query).len();
+            if let Some(picker) = &mut self.picker {
+                picker.selected = picker.selected.min(count.saturating_sub(1));
+            }
+        }
+    }
+
+    /// The picker in the middle of the screen.
+    fn draw_picker(&self, frame: &mut Frame, area: Rect) {
+        let Some(picker) = &self.picker else { return };
+        let entries = self.picker_entries(&picker.query);
+        let accent = theme::current().accent;
+        let dim = Style::new().add_modifier(Modifier::DIM);
+        let width = area.width.saturating_sub(4).min(90);
+        let rows = usize::from(area.height.saturating_sub(8)).max(3);
+        let inner_width = usize::from(width.saturating_sub(6));
+
+        let mut lines = vec![
+            Line::from(vec![
+                Span::styled("› ", Style::new().fg(accent).add_modifier(Modifier::BOLD)),
+                Span::raw(picker.query.clone()),
+            ]),
+            Line::default(),
+        ];
+        // Scroll the list so the selection stays visible.
+        let first = picker.selected.saturating_sub(rows - 1);
+        for (i, entry) in entries.iter().enumerate().skip(first).take(rows) {
+            let state = entry
+                .state
+                .map(|s| (format!("{} {}", s.symbol(), s.name()), state_style(s)))
+                .unwrap_or_default();
+            let left = format!("{} · {:>2}  {}", entry.workspace, entry.pane, entry.label);
+            let used = left.chars().count() + state.0.chars().count() + 2;
+            let dir = shorten(&entry.dir, inner_width.saturating_sub(used));
+            let pad = inner_width.saturating_sub(used + dir.chars().count());
+            let mut line = Line::from(vec![
+                Span::raw(left),
+                Span::raw("  "),
+                Span::styled(state.0, state.1),
+                Span::raw(" ".repeat(pad)),
+                Span::styled(dir, dim),
+            ]);
+            if i == picker.selected {
+                line = line.patch_style(Style::new().bg(theme::current().subtle));
+            }
+            lines.push(line);
+        }
+        if entries.is_empty() {
+            lines.push(Line::styled("no pane matches", dim));
+        }
+        lines.push(Line::default());
+        lines.push(Line::styled(
+            "type to filter · ↑↓ choose · Enter go · Esc cancel",
+            dim,
+        ));
+
+        let popup = centered(area, width, lines.len() as u16 + 2);
+        let block = Block::bordered()
+            .border_type(BorderType::Rounded)
+            .border_style(Style::new().fg(accent))
+            .title(Span::styled(
+                format!(" Go to pane · {} ", entries.len()),
+                Style::new().fg(accent).add_modifier(Modifier::BOLD),
+            ))
+            .padding(Padding::horizontal(2));
+        let inner = block.inner(popup);
+        frame.render_widget(Clear, popup);
+        frame.render_widget(Paragraph::new(lines).block(block), popup);
+        let x = inner.x + 2 + picker.query.chars().count() as u16;
+        frame.set_cursor_position(Position::new(
+            x.min(inner.right().saturating_sub(1)),
+            inner.y,
+        ));
+    }
+
     fn sidebar_focused(&self) -> bool {
         matches!(self.mode, Mode::Sidebar(_))
     }
@@ -2324,6 +2515,8 @@ impl App {
                         | Mode::Menu(_)
                         | Mode::Settings(_)
                         | Mode::Prompt
+                        | Mode::Sidebar(_)
+                        | Mode::Picker
                 )
                 && (self.mode != Mode::Copy || copy_cursor.is_some())
                 && let Some(position) = cursor
@@ -2367,6 +2560,7 @@ impl App {
             Mode::Menu(selected) => menu::draw_quit_menu(frame, body, &self.menu_items(), selected),
             Mode::Confirm(action) => self.draw_confirm(frame, body, action),
             Mode::Prompt => self.draw_prompt(frame, body),
+            Mode::Picker => self.draw_picker(frame, body),
             Mode::Prefix(_) | Mode::Normal | Mode::Repeat(..) | Mode::Copy | Mode::Sidebar(_) => {}
         }
     }
@@ -2620,6 +2814,13 @@ impl App {
                 spans.push(Span::styled(" SETTINGS ", badge));
                 spans.push(Span::styled(
                     "  ↑↓ select · ←→ Enter change · Esc close",
+                    Style::new().fg(theme::current().accent),
+                ));
+            }
+            Mode::Picker => {
+                spans.push(Span::styled(" GO TO ", badge));
+                spans.push(Span::styled(
+                    "  type to filter · Enter go · Esc cancel",
                     Style::new().fg(theme::current().accent),
                 ));
             }

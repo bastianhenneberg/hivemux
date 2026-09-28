@@ -59,6 +59,7 @@ a time, attaching from a second terminal detaches the first.
 | `Ctrl+B` `←↑↓→` | Focus the pane in that direction |
 | `Ctrl+B` `o` | Focus the next pane |
 | `Ctrl+B` `;` | Back to the pane focused before, across workspaces |
+| `Ctrl+B` `g` | Go to any pane: type to filter by workspace, name, program, state or directory |
 | `Ctrl+B` `a` | Jump to the agent that has waited longest for you, then to finished ones |
 | `Ctrl+B` `[` | Copy mode: scroll back with vim keys (`Ctrl-U`/`Ctrl-D`, `Ctrl-B`/`Ctrl-F`, `g`/`G`), `/` and `?` search down and up, `n`/`N` next, `v` select, `y` copy, `q` quit |
 | `Ctrl+B` `u` | Copy mode, one page up right away (`PgUp` works too) |
