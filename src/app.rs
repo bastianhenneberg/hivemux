@@ -67,8 +67,9 @@ enum Mode {
     Repeat(Instant, Menu),
     /// A destructive action waits for the user to confirm it with `y`.
     Confirm(Action),
-    /// The key reference is shown, the next key closes it.
-    Help,
+    /// The key reference is shown, scrolled down by this many lines. j/k
+    /// scroll, any other key closes it.
+    Help(u16),
     /// The quit menu is open with the given entry selected.
     Menu(usize),
     /// The settings menu is open with the given setting selected.
@@ -77,6 +78,8 @@ enum Mode {
     Copy,
     /// Typing a name, see `App::prompt`.
     Prompt,
+    /// The sidebar has the keyboard, the given clickable row is selected.
+    Sidebar(usize),
 }
 
 /// A line of text being typed, for renaming.
@@ -429,7 +432,8 @@ impl App {
     fn event_loop(&mut self, rx: &Receiver<AppEvent>) {
         while !self.quit {
             let body = screen_layout(self.screen, &self.config.bars).body;
-            (self.body, self.sidebar) = split_sidebar(body, &self.config.sidebar);
+            (self.body, self.sidebar) =
+                split_sidebar(body, &self.config.sidebar, self.sidebar_focused());
             self.sync_sizes();
             self.update_agents();
             self.follow_omarchy();
@@ -907,8 +911,18 @@ impl App {
                 self.mode = Mode::Normal;
                 self.command(menu, key)
             }
-            Mode::Help => {
-                self.mode = Mode::Normal;
+            Mode::Help(scroll) => {
+                self.mode = match key.code {
+                    KeyCode::Char('j') | KeyCode::Down => Mode::Help(scroll.saturating_add(1)),
+                    KeyCode::Char('k') | KeyCode::Up => Mode::Help(scroll.saturating_sub(1)),
+                    KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        Mode::Help(scroll.saturating_add(10))
+                    }
+                    KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        Mode::Help(scroll.saturating_sub(10))
+                    }
+                    _ => Mode::Normal,
+                };
                 Ok(())
             }
             Mode::Menu(selected) => {
@@ -925,6 +939,10 @@ impl App {
             }
             Mode::Prompt => {
                 self.prompt_key(key);
+                Ok(())
+            }
+            Mode::Sidebar(selected) => {
+                self.sidebar_key(key, selected);
                 Ok(())
             }
             Mode::Confirm(action) => {
@@ -994,6 +1012,7 @@ impl App {
             Command::JumpToWaiting => self.jump_to_waiting(),
             Command::RenamePane => self.start_prompt(RenameTarget::Pane(self.ws.focus)),
             Command::RenameWorkspace => self.start_prompt(RenameTarget::Workspace(self.workspace)),
+            Command::FocusSidebar => self.focus_sidebar(),
             Command::ToggleSidebar => {
                 self.config.sidebar.enabled = !self.config.sidebar.enabled;
                 if let Err(e) = self.config.save() {
@@ -1007,7 +1026,7 @@ impl App {
             }
             Command::Detach => self.detach(),
             Command::Quit => self.mode = Mode::Confirm(Action::KillServer),
-            Command::Help => self.mode = Mode::Help,
+            Command::Help => self.mode = Mode::Help(0),
             Command::SessionMenu => self.mode = Mode::Menu(0),
             Command::Settings => self.mode = Mode::Settings(0),
             Command::Workspace(n) => self.switch_workspace(n),
@@ -1490,6 +1509,66 @@ impl App {
         None
     }
 
+    fn sidebar_focused(&self) -> bool {
+        matches!(self.mode, Mode::Sidebar(_))
+    }
+
+    /// Gives the sidebar the keyboard, with the row of the focused pane's
+    /// agent, or else the active workspace, selected.
+    fn focus_sidebar(&mut self) {
+        let targets = sidebar::targets(&self.sidebar_data());
+        let selected = targets
+            .iter()
+            .position(|t| *t == sidebar::Target::Pane(self.ws.focus))
+            .or_else(|| {
+                targets
+                    .iter()
+                    .position(|t| *t == sidebar::Target::Workspace(self.workspace))
+            })
+            .unwrap_or(0);
+        self.mode = Mode::Sidebar(selected);
+    }
+
+    /// The sidebar with the keyboard: j/k move, Enter goes there, r names
+    /// the row's workspace or pane, x closes the row's pane, Esc leaves.
+    fn sidebar_key(&mut self, key: KeyEvent, selected: usize) {
+        let targets = sidebar::targets(&self.sidebar_data());
+        if targets.is_empty() {
+            self.mode = Mode::Normal;
+            return;
+        }
+        let selected = selected.min(targets.len() - 1);
+        let target = targets[selected];
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q' | 'e') => self.mode = Mode::Normal,
+            KeyCode::Down | KeyCode::Char('j') | KeyCode::Tab => {
+                self.mode = Mode::Sidebar((selected + 1) % targets.len());
+            }
+            KeyCode::Up | KeyCode::Char('k') | KeyCode::BackTab => {
+                self.mode = Mode::Sidebar((selected + targets.len() - 1) % targets.len());
+            }
+            KeyCode::Char('g') | KeyCode::Home => self.mode = Mode::Sidebar(0),
+            KeyCode::Char('G') | KeyCode::End => self.mode = Mode::Sidebar(targets.len() - 1),
+            KeyCode::Enter | KeyCode::Char('l') | KeyCode::Right => {
+                self.mode = Mode::Normal;
+                match target {
+                    sidebar::Target::Workspace(n) => self.switch_workspace(n),
+                    sidebar::Target::Pane(id) => self.reveal(id),
+                }
+            }
+            KeyCode::Char('r') => self.start_prompt(match target {
+                sidebar::Target::Workspace(n) => RenameTarget::Workspace(n),
+                sidebar::Target::Pane(id) => RenameTarget::Pane(id),
+            }),
+            KeyCode::Char('x') => {
+                if let sidebar::Target::Pane(id) = target {
+                    self.mode = Mode::Confirm(Action::ClosePane(id));
+                }
+            }
+            _ => {}
+        }
+    }
+
     /// Opens the name prompt for `target`, filled with its current name.
     fn start_prompt(&mut self, target: RenameTarget) {
         let text = self.name_of(target).unwrap_or_default();
@@ -1809,7 +1888,8 @@ impl App {
 
     fn draw(&self, frame: &mut Frame) {
         let screen = screen_layout(frame.area(), &self.config.bars);
-        let (body, sidebar_area) = split_sidebar(screen.body, &self.config.sidebar);
+        let (body, sidebar_area) =
+            split_sidebar(screen.body, &self.config.sidebar, self.sidebar_focused());
 
         for (id, rect) in self.ws.rects(body) {
             let Some(pane) = self.panes.get(&id) else {
@@ -1872,7 +1952,7 @@ impl App {
                 && !matches!(
                     self.mode,
                     Mode::Confirm(_)
-                        | Mode::Help
+                        | Mode::Help(_)
                         | Mode::Menu(_)
                         | Mode::Settings(_)
                         | Mode::Prompt
@@ -1885,7 +1965,11 @@ impl App {
         }
 
         if let Some(area) = sidebar_area {
-            sidebar::draw(frame, area, &self.sidebar_data());
+            let selected = match self.mode {
+                Mode::Sidebar(i) => Some(i),
+                _ => None,
+            };
+            sidebar::draw(frame, area, &self.sidebar_data(), selected);
         }
         if let Some(area) = screen.top {
             self.draw_bar(frame, area, Placement::Top);
@@ -1905,11 +1989,11 @@ impl App {
                 selected,
                 self.config_note.as_deref(),
             ),
-            Mode::Help => menu::draw_help(frame, body),
+            Mode::Help(scroll) => menu::draw_help(frame, body, scroll),
             Mode::Menu(selected) => menu::draw_quit_menu(frame, body, &self.menu_items(), selected),
             Mode::Confirm(action) => self.draw_confirm(frame, body, action),
             Mode::Prompt => self.draw_prompt(frame, body),
-            Mode::Prefix(_) | Mode::Normal | Mode::Repeat(..) | Mode::Copy => {}
+            Mode::Prefix(_) | Mode::Normal | Mode::Repeat(..) | Mode::Copy | Mode::Sidebar(_) => {}
         }
     }
 
@@ -2157,6 +2241,13 @@ impl App {
                     Style::new().fg(theme::current().accent),
                 ));
             }
+            Mode::Sidebar(_) => {
+                spans.push(Span::styled(" SIDEBAR ", badge));
+                spans.push(Span::styled(
+                    "  j k move · Enter go · r name · x close · Esc back",
+                    Style::new().fg(theme::current().accent),
+                ));
+            }
             Mode::Prompt => {
                 spans.push(Span::styled(" NAME ", badge));
                 spans.push(Span::styled(
@@ -2171,10 +2262,10 @@ impl App {
                     Style::new().fg(theme::current().accent),
                 ));
             }
-            Mode::Help => {
+            Mode::Help(_) => {
                 spans.push(Span::styled(" HELP ", badge));
                 spans.push(Span::styled(
-                    "  any key closes",
+                    "  j k scroll · any other key closes",
                     Style::new().fg(theme::current().accent),
                 ));
             }
@@ -2300,9 +2391,10 @@ const BADGE: &str = " ⬢ hivemux ";
 
 /// The panes' area and the sidebar's, if it is on and there is room for it
 /// next to panes at least as wide.
-fn split_sidebar(body: Rect, config: &config::Sidebar) -> (Rect, Option<Rect>) {
+/// A focused sidebar is shown even when it is turned off.
+fn split_sidebar(body: Rect, config: &config::Sidebar, focused: bool) -> (Rect, Option<Rect>) {
     let width = sidebar::WIDTH;
-    if !config.enabled || body.width < 2 * width {
+    if !(config.enabled || focused) || body.width < 2 * width {
         return (body, None);
     }
     let rest = body.width - width;
@@ -2411,18 +2503,22 @@ mod tests {
     fn sidebar_takes_its_side_when_there_is_room() {
         let body = Rect::new(0, 1, 120, 30);
         let mut config = config::Sidebar::default();
-        let (panes, side) = split_sidebar(body, &config);
+        let (panes, side) = split_sidebar(body, &config, false);
         assert_eq!(panes, Rect::new(0, 1, 90, 30));
         assert_eq!(side, Some(Rect::new(90, 1, 30, 30)));
 
         config.side = Side::Left;
-        let (panes, side) = split_sidebar(body, &config);
+        let (panes, side) = split_sidebar(body, &config, false);
         assert_eq!(panes, Rect::new(30, 1, 90, 30));
         assert_eq!(side, Some(Rect::new(0, 1, 30, 30)));
 
-        assert_eq!(split_sidebar(Rect::new(0, 0, 50, 20), &config).1, None);
+        assert_eq!(
+            split_sidebar(Rect::new(0, 0, 50, 20), &config, false).1,
+            None
+        );
         config.enabled = false;
-        assert_eq!(split_sidebar(body, &config), (body, None));
+        assert_eq!(split_sidebar(body, &config, false), (body, None));
+        assert!(split_sidebar(body, &config, true).1.is_some());
     }
 
     #[test]

@@ -62,7 +62,8 @@ a time, attaching from a second terminal detaches the first.
 | `Ctrl+B` `q` | Quit menu: detach, close the pane or end the session |
 | `Ctrl+B` `d` | Detach, the shells keep running |
 | `Ctrl+B` `Q` | Quit: end the session and every shell in it (asks first) |
-| `Ctrl+B` `s` | Show or hide the sidebar |
+| `Ctrl+B` `b` | Show or hide the sidebar |
+| `Ctrl+B` `e` | Into the sidebar: `j`/`k` move, `Enter` go, `r` name, `x` close, `Esc` back |
 | `Ctrl+B` `,` | Settings |
 | `Ctrl+B` `?` | Show all keys |
 | `Ctrl+B` `Ctrl+B` | Send `Ctrl+B` to the shell |
@@ -77,8 +78,8 @@ A pane closes when its shell exits, hivemux exits with the last pane.
 A sidebar on the right, like the rail in TUIOS, lists every workspace with its project (the
 focused pane's directory) and what its agents are doing, every agent across all workspaces with
 its workspace, directory and how long it has been in its state, and the git branch of the
-focused pane. Agents waiting for you come first. Click a row to go there. `Ctrl+B s` shows or
-hides it, the settings put it left or right.
+focused pane. Agents waiting for you come first. Click a row to go there. `Ctrl+B b` shows or
+hides it (as in TUIOS), `Ctrl+B e` moves the keyboard into it, the settings put it left or right.
 
 ## Agents
 

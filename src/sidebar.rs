@@ -148,10 +148,16 @@ pub fn lines(data: &Data, width: u16) -> Vec<(Line<'static>, Option<Target>)> {
     out
 }
 
-pub fn draw(frame: &mut Frame, area: Rect, data: &Data) {
+/// Draws the sidebar. `selected` is the index of the highlighted row among
+/// the clickable ones, when the sidebar has the keyboard.
+pub fn draw(frame: &mut Frame, area: Rect, data: &Data, selected: Option<usize>) {
+    let border = match selected {
+        Some(_) => theme::current().accent,
+        None => theme::current().subtle,
+    };
     let block = Block::bordered()
         .border_type(BorderType::Rounded)
-        .border_style(Style::new().fg(theme::current().subtle))
+        .border_style(Style::new().fg(border))
         .title(Span::styled(
             " ⬢ hivemux ",
             Style::new()
@@ -159,12 +165,33 @@ pub fn draw(frame: &mut Frame, area: Rect, data: &Data) {
                 .add_modifier(Modifier::BOLD),
         ));
     let inner = block.inner(area);
+    let mut clickable = 0;
     let rows: Vec<Line> = lines(data, inner.width)
         .into_iter()
-        .map(|(line, _)| line)
+        .map(|(line, target)| {
+            let Some(_) = target else { return line };
+            let highlight = selected == Some(clickable);
+            clickable += 1;
+            if highlight {
+                let width = usize::from(inner.width).saturating_sub(line.width());
+                let mut line = line;
+                line.spans.push(Span::raw(" ".repeat(width)));
+                line.patch_style(Style::new().bg(theme::current().subtle))
+            } else {
+                line
+            }
+        })
         .collect();
     frame.render_widget(Clear, area);
     frame.render_widget(Paragraph::new(rows).block(block), area);
+}
+
+/// The clickable rows' targets, top to bottom.
+pub fn targets(data: &Data) -> Vec<Target> {
+    lines(data, WIDTH)
+        .into_iter()
+        .filter_map(|(_, target)| target)
+        .collect()
 }
 
 /// What the row at `pos` does when clicked, for a sidebar drawn at `area`.
@@ -301,6 +328,14 @@ mod tests {
         );
         assert_eq!(target_at(&data, area, Position::new(72, 1)), None);
         assert_eq!(target_at(&data, area, Position::new(70, 2)), None);
+    }
+
+    #[test]
+    fn targets_list_workspaces_then_agents() {
+        assert_eq!(
+            targets(&data()),
+            vec![Target::Workspace(1), Target::Workspace(2), Target::Pane(7)]
+        );
     }
 
     #[test]

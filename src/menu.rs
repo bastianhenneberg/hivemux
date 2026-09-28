@@ -39,7 +39,9 @@ pub fn draw_which_key(frame: &mut Frame, area: Rect, side: Side, menu: Menu) {
 }
 
 /// The full key reference in the middle of `area`.
-pub fn draw_help(frame: &mut Frame, area: Rect) {
+/// The full key reference in the middle of `area`, scrolled down by
+/// `scroll` lines when it is taller than the screen.
+pub fn draw_help(frame: &mut Frame, area: Rect, scroll: u16) {
     let area = inset(area);
     let dim = Style::new().add_modifier(Modifier::DIM);
     let mut lines = vec![
@@ -67,7 +69,9 @@ pub fn draw_help(frame: &mut Frame, area: Rect) {
         Line::styled("`hivemux keys` prints this list in a shell.", dim),
         Line::default(),
         Line::from(vec![
-            Span::styled("any key", key_style()),
+            Span::styled("j k", key_style()),
+            Span::raw(" scroll · "),
+            Span::styled("any other key", key_style()),
             Span::raw(" close"),
         ]),
     ]);
@@ -83,7 +87,16 @@ pub fn draw_help(frame: &mut Frame, area: Rect) {
         height,
     );
 
-    draw_box(frame, popup, " ⬢ hivemux keys ".into(), 2, lines);
+    // Scroll no further than the last line reaching the bottom.
+    let overflow = (lines.len() as u16 + 2).saturating_sub(height);
+    draw_box_scrolled(
+        frame,
+        popup,
+        " ⬢ hivemux keys ".into(),
+        2,
+        lines,
+        scroll.min(overflow),
+    );
 }
 
 /// `area` minus one cell on each side, so popups leave the pane borders
@@ -99,13 +112,27 @@ fn draw_box(
     padding: u16,
     lines: Vec<Line<'static>>,
 ) {
+    draw_box_scrolled(frame, popup, title, padding, lines, 0);
+}
+
+fn draw_box_scrolled(
+    frame: &mut Frame,
+    popup: Rect,
+    title: String,
+    padding: u16,
+    lines: Vec<Line<'static>>,
+    scroll: u16,
+) {
     let block = Block::bordered()
         .border_type(BorderType::Rounded)
         .border_style(Style::new().fg(theme::current().accent))
         .title(Span::styled(title, key_style()))
         .padding(Padding::horizontal(padding));
     frame.render_widget(Clear, popup);
-    frame.render_widget(Paragraph::new(lines).block(block), popup);
+    frame.render_widget(
+        Paragraph::new(lines).block(block).scroll((scroll, 0)),
+        popup,
+    );
 }
 
 /// All groups, side by side when they fit into `max_width`, stacked
@@ -414,8 +441,17 @@ mod tests {
     }
 
     #[test]
+    fn help_scrolls_when_the_screen_is_short() {
+        let top = render(80, 20, |f, a| draw_help(f, a, 0));
+        let scrolled = render(80, 20, |f, a| draw_help(f, a, 500));
+        assert!(top.contains("Press"));
+        assert!(!scrolled.contains("Press"));
+        assert!(scrolled.contains("any other key"));
+    }
+
+    #[test]
     fn help_lists_every_binding() {
-        let screen = render(100, 40, draw_help);
+        let screen = render(160, 60, |f, a| draw_help(f, a, 0));
         for binding in crate::bindings::BINDINGS {
             assert!(
                 screen.contains(binding.description),

@@ -31,6 +31,8 @@ pub enum Command {
     NextFloat,
     RenamePane,
     RenameWorkspace,
+    /// Give the sidebar the keyboard.
+    FocusSidebar,
     /// Show or hide the sidebar.
     ToggleSidebar,
     /// Focus the agent waiting longest for the user.
@@ -326,10 +328,16 @@ pub const BINDINGS: &[Binding] = &[
         keys: &[(Key::plain(Char('Q')), C::Quit)],
     },
     Binding {
-        label: "s",
-        description: "sidebar",
+        label: "e",
+        description: "into the sidebar",
+        group: Group::Navigate,
+        keys: &[(Key::plain(Char('e')), C::FocusSidebar)],
+    },
+    Binding {
+        label: "b",
+        description: "show/hide sidebar",
         group: Group::Session,
-        keys: &[(Key::plain(Char('s')), C::ToggleSidebar)],
+        keys: &[(Key::plain(Char('b')), C::ToggleSidebar)],
     },
     Binding {
         label: ",",
