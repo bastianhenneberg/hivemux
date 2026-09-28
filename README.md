@@ -6,7 +6,7 @@ hivemux combines tiling and floating windows with a tmux-style prefix, and keeps
 the agents running in its panes: working, blocked, or idle.
 
 > **Status:** early prototype. hivemux runs shells in split panes, including full-screen
-> programs like nvim, and keeps them running when you detach.
+> programs like nvim, spread over workspaces, and keeps them running when you detach.
 
 ## Ideas
 
@@ -23,7 +23,7 @@ Inspired by [TUIOS](https://github.com/Gaurav-Gosain/tuios) and [herdr](https://
 1. ~~One shell in one pane (PTY → VT emulation → rendering)~~ ✓
 2. ~~Splits with a BSP tree, focus, resize, prefix keys~~ ✓
 3. ~~Server/client split with detach and reattach~~ ✓
-4. Floating windows and workspaces
+4. Floating windows and ~~workspaces~~ ✓
 5. Copy mode, scrollback, mouse
 6. Agent status, socket API
 7. Layout persistence across restarts
@@ -50,6 +50,9 @@ a time, attaching from a second terminal detaches the first.
 | `Ctrl+B` `x` | Close the pane (asks first) |
 | `Ctrl+B` `←↑↓→` | Focus the pane in that direction |
 | `Ctrl+B` `o` | Focus the next pane |
+| `Ctrl+B` `1`–`9` | Go to workspace, an empty one starts a shell |
+| `Ctrl+B` `c` | New workspace |
+| `Ctrl+B` `n` / `p` | Next / previous workspace |
 | `Ctrl+B` `Ctrl+←↑↓→` | Resize by one cell (`Alt` for five) |
 | `Ctrl+B` `q` | Quit menu: detach, close the pane or end the session |
 | `Ctrl+B` `d` | Detach, the shells keep running |

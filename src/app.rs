@@ -2,7 +2,7 @@
 //! connections all come in over one channel, and after each batch of events
 //! the screen is rendered for the attached client.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::io::{self, Write};
 use std::os::unix::net::UnixStream;
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
@@ -138,8 +138,14 @@ impl Write for FrameSink {
 
 pub struct App {
     panes: HashMap<PaneId, Pane>,
+    /// The active workspace's layout and focused pane.
     layout: Layout,
     focus: PaneId,
+    /// The number of the active workspace.
+    workspace: u8,
+    /// The other workspaces, each with its layout and focused pane. Their
+    /// panes keep running, they are just not drawn.
+    hidden: BTreeMap<u8, (Layout, PaneId)>,
     next_id: PaneId,
     /// The attached client's screen.
     screen: Rect,
@@ -172,6 +178,8 @@ impl App {
         let mut app = App {
             panes: HashMap::from([(0, first)]),
             layout: Layout::new(0),
+            workspace: 1,
+            hidden: BTreeMap::new(),
             focus: 0,
             next_id: 1,
             screen: DEFAULT_SCREEN,
@@ -411,6 +419,14 @@ impl App {
             Command::Help => self.mode = Mode::Help,
             Command::SessionMenu => self.mode = Mode::Menu(0),
             Command::Settings => self.mode = Mode::Settings(0),
+            Command::Workspace(n) => self.switch_workspace(n),
+            Command::NewWorkspace => {
+                if let Some(n) = (1..=9).find(|n| !self.workspace_exists(*n)) {
+                    self.switch_workspace(n);
+                }
+            }
+            Command::NextWorkspace => self.step_workspace(true),
+            Command::PrevWorkspace => self.step_workspace(false),
             // Prefix twice sends the prefix key itself to the pane.
             Command::SendPrefix => {
                 if let Some(pane) = self.panes.get_mut(&self.focus) {
@@ -526,12 +542,35 @@ impl App {
         }
     }
 
-    /// Removes pane `id`, killing its process if it still runs. Quits when
-    /// the last pane is gone.
+    /// Removes pane `id`, killing its process if it still runs. A workspace
+    /// without panes disappears. When the active one does, another one is
+    /// shown, and when none is left, hivemux quits.
     fn close(&mut self, id: PaneId) {
         if self.panes.remove(&id).is_none() {
             return;
         }
+
+        if !self.layout.contains(id) {
+            let Some(n) = self
+                .hidden
+                .iter()
+                .find_map(|(n, (layout, _))| layout.contains(id).then_some(*n))
+            else {
+                return;
+            };
+            let (layout, focus) = self.hidden.get_mut(&n).expect("found above");
+            let next = layout.remove(id);
+            if *focus == id
+                && let Some(next) = next
+            {
+                *focus = next;
+            }
+            if layout.is_empty() {
+                self.hidden.remove(&n);
+            }
+            return;
+        }
+
         let next = self.layout.remove(id);
         if self.focus == id
             && let Some(next) = next
@@ -539,7 +578,92 @@ impl App {
             self.focus = next;
         }
         if self.layout.is_empty() {
-            self.quit = true;
+            // Show the nearest remaining workspace, preferring a lower number.
+            let current = self.workspace;
+            let nearest = self
+                .hidden
+                .keys()
+                .copied()
+                .min_by_key(|n| (n.abs_diff(current), *n > current));
+            match nearest {
+                Some(n) => self.show(n),
+                None => self.quit = true,
+            }
+        }
+    }
+
+    fn workspace_exists(&self, n: u8) -> bool {
+        n == self.workspace || self.hidden.contains_key(&n)
+    }
+
+    /// Numbers of all workspaces that have panes, in order.
+    fn workspaces(&self) -> Vec<u8> {
+        let mut all: Vec<u8> = self.hidden.keys().copied().collect();
+        all.push(self.workspace);
+        all.sort_unstable();
+        all
+    }
+
+    /// Makes workspace `n` the active one. An empty workspace gets a new
+    /// shell, like an empty workspace in i3.
+    fn switch_workspace(&mut self, n: u8) {
+        if n == self.workspace {
+            return;
+        }
+        if self.hidden.contains_key(&n) {
+            self.show(n);
+            return;
+        }
+
+        let id = self.next_id;
+        let inner = pane_inner(self.body);
+        let pane = match Pane::spawn(id, inner.height, inner.width, self.events.clone()) {
+            Ok(pane) => pane,
+            Err(e) => {
+                eprintln!("failed to start a shell for workspace {n}: {e:#}");
+                return;
+            }
+        };
+        self.next_id += 1;
+        self.panes.insert(id, pane);
+        self.stash();
+        self.workspace = n;
+        self.layout = Layout::new(id);
+        self.focus = id;
+    }
+
+    /// Goes to the next or previous workspace that exists, wrapping around.
+    fn step_workspace(&mut self, forward: bool) {
+        let all = self.workspaces();
+        let Some(i) = all.iter().position(|&n| n == self.workspace) else {
+            return;
+        };
+        let len = all.len();
+        let next = if forward {
+            (i + 1) % len
+        } else {
+            (i + len - 1) % len
+        };
+        self.switch_workspace(all[next]);
+    }
+
+    /// Brings hidden workspace `n` to the front, hiding the active one unless
+    /// it is empty.
+    fn show(&mut self, n: u8) {
+        let Some((layout, focus)) = self.hidden.remove(&n) else {
+            return;
+        };
+        self.stash();
+        self.workspace = n;
+        self.layout = layout;
+        self.focus = focus;
+    }
+
+    /// Moves the active workspace into `hidden`, if it has any panes.
+    fn stash(&mut self) {
+        let layout = std::mem::replace(&mut self.layout, Layout::empty());
+        if !layout.is_empty() {
+            self.hidden.insert(self.workspace, (layout, self.focus));
         }
     }
 
@@ -711,6 +835,20 @@ impl App {
             .add_modifier(Modifier::BOLD);
         let hint = Style::new().add_modifier(Modifier::DIM);
         let mut spans = vec![Span::styled(" ⬢ hivemux ", badge), Span::raw(" ")];
+        for n in self.workspaces() {
+            if n == self.workspace {
+                spans.push(Span::styled(
+                    format!(" {n} "),
+                    Style::new()
+                        .fg(HONEY)
+                        .bg(Color::DarkGray)
+                        .add_modifier(Modifier::BOLD),
+                ));
+            } else {
+                spans.push(Span::styled(format!(" {n} "), hint));
+            }
+        }
+        spans.push(Span::styled("│ ", hint));
         match self.mode {
             Mode::Prefix => {
                 spans.push(Span::styled(" PREFIX ", badge));

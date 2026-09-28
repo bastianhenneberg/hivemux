@@ -61,8 +61,17 @@ impl Layout {
         }
     }
 
+    /// A layout without panes.
+    pub fn empty() -> Self {
+        Self { root: None }
+    }
+
     pub fn is_empty(&self) -> bool {
         self.root.is_none()
+    }
+
+    pub fn contains(&self, pane: PaneId) -> bool {
+        self.root.as_ref().is_some_and(|root| root.contains(pane))
     }
 
     /// Splits `target` in half along `axis`, putting `new` second (right or
