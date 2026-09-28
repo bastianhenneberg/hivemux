@@ -18,7 +18,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Clear, Padding, Paragraph};
 use ratatui::{Frame, Terminal, TerminalOptions, Viewport};
 
-use crate::bindings::{self, Command};
+use crate::bindings::{self, Command, Menu};
 use crate::config::{Config, SETTINGS};
 use crate::keys;
 use crate::layout::{Axis, MIN_PANE_SIZE, PaneId};
@@ -49,10 +49,11 @@ pub enum AppEvent {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Mode {
     Normal,
-    /// The prefix was pressed, the next key is a command.
-    Prefix,
-    /// A repeatable command just ran, arrow keys repeat it until the deadline.
-    Repeat(Instant),
+    /// The prefix was pressed, the next key is a command in this menu.
+    Prefix(Menu),
+    /// A repeatable command just ran from this menu, its keys repeat without
+    /// the prefix until the deadline.
+    Repeat(Instant, Menu),
     /// A destructive action waits for the user to confirm it with `y`.
     Confirm(Action),
     /// The key reference is shown, the next key closes it.
@@ -208,7 +209,7 @@ impl App {
             // Block for the next event, then take everything else that is
             // already queued, so a burst of output costs one redraw.
             let event = match self.mode {
-                Mode::Repeat(until) => {
+                Mode::Repeat(until, _) => {
                     match rx.recv_timeout(until.saturating_duration_since(Instant::now())) {
                         Ok(event) => event,
                         Err(RecvTimeoutError::Timeout) => {
@@ -347,9 +348,9 @@ impl App {
         }
 
         match self.mode {
-            Mode::Prefix => {
+            Mode::Prefix(menu) => {
                 self.mode = Mode::Normal;
-                self.command(key)
+                self.command(menu, key)
             }
             Mode::Help => {
                 self.mode = Mode::Normal;
@@ -370,16 +371,16 @@ impl App {
                 }
                 Ok(())
             }
-            Mode::Repeat(until)
+            Mode::Repeat(until, menu)
                 if Instant::now() < until
-                    && bindings::lookup(key).is_some_and(Command::repeatable) =>
+                    && bindings::lookup(menu, key).is_some_and(Command::repeatable) =>
             {
-                self.command(key)
+                self.command(menu, key)
             }
             _ => {
                 self.mode = Mode::Normal;
                 if is_prefix(key) {
-                    self.mode = Mode::Prefix;
+                    self.mode = Mode::Prefix(Menu::Root);
                     return Ok(());
                 }
                 let Some(pane) = self.panes.get_mut(&self.ws.focus) else {
@@ -396,8 +397,8 @@ impl App {
 
     /// Runs the command bound to `key` after the prefix. Unbound keys just
     /// end the prefix.
-    fn command(&mut self, key: KeyEvent) -> Result<()> {
-        let Some(command) = bindings::lookup(key) else {
+    fn command(&mut self, menu: Menu, key: KeyEvent) -> Result<()> {
+        let Some(command) = bindings::lookup(menu, key) else {
             return Ok(());
         };
         match command {
@@ -416,6 +417,9 @@ impl App {
             }
             Command::ToggleFloat => self.ws.toggle_float(self.body),
             Command::NewFloat => self.new_float(),
+            Command::NextFloat => self.ws.next_float(),
+            Command::Open(menu) => self.mode = Mode::Prefix(menu),
+            Command::Back => self.mode = Mode::Prefix(Menu::Root),
             Command::Detach => self.detach(),
             Command::Quit => self.mode = Mode::Confirm(Action::KillServer),
             Command::Help => self.mode = Mode::Help,
@@ -438,7 +442,7 @@ impl App {
             Command::Cancel => {}
         }
         if command.repeatable() {
-            self.mode = Mode::Repeat(Instant::now() + REPEAT_TIME);
+            self.mode = Mode::Repeat(Instant::now() + REPEAT_TIME, menu);
         }
         Ok(())
     }
@@ -732,8 +736,8 @@ impl App {
         frame.render_widget(self.status_line(), status_area);
 
         match self.mode {
-            Mode::Prefix if self.config.which_key.enabled => {
-                menu::draw_which_key(frame, body, self.config.which_key.position);
+            Mode::Prefix(menu) if self.config.which_key.enabled => {
+                menu::draw_which_key(frame, body, self.config.which_key.position, menu);
             }
             Mode::Settings(selected) => menu::draw_settings(
                 frame,
@@ -745,7 +749,7 @@ impl App {
             Mode::Help => menu::draw_help(frame, body),
             Mode::Menu(selected) => menu::draw_quit_menu(frame, body, &self.menu_items(), selected),
             Mode::Confirm(action) => self.draw_confirm(frame, body, action),
-            Mode::Prefix | Mode::Normal | Mode::Repeat(_) => {}
+            Mode::Prefix(_) | Mode::Normal | Mode::Repeat(..) => {}
         }
     }
 
@@ -856,7 +860,7 @@ impl App {
         }
         spans.push(Span::styled("│ ", hint));
         match self.mode {
-            Mode::Prefix => {
+            Mode::Prefix(_) => {
                 spans.push(Span::styled(" PREFIX ", badge));
                 spans.push(Span::styled(
                     "  ? all keys · Esc cancel",
@@ -894,7 +898,7 @@ impl App {
                     Style::new().fg(Color::LightRed),
                 ));
             }
-            Mode::Repeat(_) => {
+            Mode::Repeat(..) => {
                 spans.push(Span::styled(" REPEAT ", badge));
                 spans.push(Span::styled(
                     "  ←↑↓→ focus  ^←↑↓→ resize",

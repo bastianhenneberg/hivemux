@@ -28,9 +28,14 @@ pub enum Command {
     NewWorkspace,
     NextWorkspace,
     PrevWorkspace,
+    NextFloat,
     Quit,
     Help,
     SendPrefix,
+    /// Opens a submenu, like a group in which-key.nvim.
+    Open(Menu),
+    /// Goes back from a submenu to the main menu.
+    Back,
     Cancel,
 }
 
@@ -40,8 +45,42 @@ impl Command {
     pub fn repeatable(self) -> bool {
         matches!(
             self,
-            Command::Focus(_) | Command::Resize(..) | Command::Move(..)
+            Command::Focus(_)
+                | Command::Resize(..)
+                | Command::Move(..)
+                | Command::NextFloat
+                | Command::NextWorkspace
+                | Command::PrevWorkspace
         )
+    }
+}
+
+/// The menus after the prefix: the main one and its submenus.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Menu {
+    Root,
+    Floating,
+    Workspaces,
+}
+
+impl Menu {
+    pub const ALL: [Menu; 3] = [Menu::Root, Menu::Floating, Menu::Workspaces];
+
+    pub fn groups(self) -> &'static [Group] {
+        match self {
+            Menu::Root => &[Group::Panes, Group::Navigate, Group::Session],
+            Menu::Floating => &[Group::Floating],
+            Menu::Workspaces => &[Group::Workspaces],
+        }
+    }
+
+    /// The keys that open this menu, after the prefix, e.g. `f`.
+    pub fn path(self) -> &'static str {
+        match self {
+            Menu::Root => "",
+            Menu::Floating => "f",
+            Menu::Workspaces => "w",
+        }
     }
 }
 
@@ -50,16 +89,26 @@ pub enum Group {
     Panes,
     Navigate,
     Session,
+    Floating,
+    Workspaces,
 }
 
 impl Group {
-    pub const ALL: [Group; 3] = [Group::Panes, Group::Navigate, Group::Session];
-
     pub fn title(self) -> &'static str {
         match self {
             Group::Panes => "Panes",
             Group::Navigate => "Navigate",
             Group::Session => "Session",
+            Group::Floating => "Floating panes",
+            Group::Workspaces => "Workspaces",
+        }
+    }
+
+    pub fn menu(self) -> Menu {
+        match self {
+            Group::Panes | Group::Navigate | Group::Session => Menu::Root,
+            Group::Floating => Menu::Floating,
+            Group::Workspaces => Menu::Workspaces,
         }
     }
 }
@@ -145,15 +194,9 @@ pub const BINDINGS: &[Binding] = &[
     },
     Binding {
         label: "f",
-        description: "float / tile pane",
+        description: "floating…",
         group: Group::Panes,
-        keys: &[(Key::plain(Char('f')), C::ToggleFloat)],
-    },
-    Binding {
-        label: "F",
-        description: "new floating pane",
-        group: Group::Panes,
-        keys: &[(Key::plain(Char('F')), C::NewFloat)],
+        keys: &[(Key::plain(Char('f')), C::Open(Menu::Floating))],
     },
     Binding {
         label: "Shift ←↑↓→",
@@ -200,19 +243,10 @@ pub const BINDINGS: &[Binding] = &[
         ],
     },
     Binding {
-        label: "c",
-        description: "new workspace",
+        label: "w",
+        description: "workspaces…",
         group: Group::Navigate,
-        keys: &[(Key::plain(Char('c')), C::NewWorkspace)],
-    },
-    Binding {
-        label: "n p",
-        description: "next/prev workspace",
-        group: Group::Navigate,
-        keys: &[
-            (Key::plain(Char('n')), C::NextWorkspace),
-            (Key::plain(Char('p')), C::PrevWorkspace),
-        ],
+        keys: &[(Key::plain(Char('w')), C::Open(Menu::Workspaces))],
     },
     Binding {
         label: "Ctrl ←↑↓→",
@@ -278,12 +312,126 @@ pub const BINDINGS: &[Binding] = &[
         group: Group::Session,
         keys: &[(Key::plain(Esc), C::Cancel)],
     },
+    // Floating panes, after the prefix and `f`.
+    Binding {
+        label: "f",
+        description: "float / tile this pane",
+        group: Group::Floating,
+        keys: &[(Key::plain(Char('f')), C::ToggleFloat)],
+    },
+    Binding {
+        label: "n",
+        description: "new floating pane",
+        group: Group::Floating,
+        keys: &[(Key::plain(Char('n')), C::NewFloat)],
+    },
+    Binding {
+        label: "o",
+        description: "next floating pane",
+        group: Group::Floating,
+        keys: &[
+            (Key::plain(Char('o')), C::NextFloat),
+            (Key::plain(KeyCode::Tab), C::NextFloat),
+        ],
+    },
+    Binding {
+        label: "←↑↓→",
+        description: "move",
+        group: Group::Floating,
+        keys: &[
+            (Key::plain(KeyCode::Left), C::Move(Left, 1)),
+            (Key::plain(KeyCode::Right), C::Move(Right, 1)),
+            (Key::plain(KeyCode::Up), C::Move(Up, 1)),
+            (Key::plain(KeyCode::Down), C::Move(Down, 1)),
+        ],
+    },
+    Binding {
+        label: "Ctrl ←↑↓→",
+        description: "resize by 1",
+        group: Group::Floating,
+        keys: &[
+            (Key::ctrl(KeyCode::Left), C::Resize(Left, 1)),
+            (Key::ctrl(KeyCode::Right), C::Resize(Right, 1)),
+            (Key::ctrl(KeyCode::Up), C::Resize(Up, 1)),
+            (Key::ctrl(KeyCode::Down), C::Resize(Down, 1)),
+        ],
+    },
+    Binding {
+        label: "Alt ←↑↓→",
+        description: "resize by 5",
+        group: Group::Floating,
+        keys: &[
+            (Key::alt(KeyCode::Left), C::Resize(Left, 5)),
+            (Key::alt(KeyCode::Right), C::Resize(Right, 5)),
+            (Key::alt(KeyCode::Up), C::Resize(Up, 5)),
+            (Key::alt(KeyCode::Down), C::Resize(Down, 5)),
+        ],
+    },
+    Binding {
+        label: "⌫",
+        description: "back",
+        group: Group::Floating,
+        keys: &[(Key::plain(KeyCode::Backspace), C::Back)],
+    },
+    Binding {
+        label: "Esc",
+        description: "cancel",
+        group: Group::Floating,
+        keys: &[(Key::plain(Esc), C::Cancel)],
+    },
+    // Workspaces, after the prefix and `w`.
+    Binding {
+        label: "1-9",
+        description: "go to workspace",
+        group: Group::Workspaces,
+        keys: &[
+            (Key::plain(Char('1')), C::Workspace(1)),
+            (Key::plain(Char('2')), C::Workspace(2)),
+            (Key::plain(Char('3')), C::Workspace(3)),
+            (Key::plain(Char('4')), C::Workspace(4)),
+            (Key::plain(Char('5')), C::Workspace(5)),
+            (Key::plain(Char('6')), C::Workspace(6)),
+            (Key::plain(Char('7')), C::Workspace(7)),
+            (Key::plain(Char('8')), C::Workspace(8)),
+            (Key::plain(Char('9')), C::Workspace(9)),
+        ],
+    },
+    Binding {
+        label: "c",
+        description: "new workspace",
+        group: Group::Workspaces,
+        keys: &[(Key::plain(Char('c')), C::NewWorkspace)],
+    },
+    Binding {
+        label: "n p ←→",
+        description: "next / previous",
+        group: Group::Workspaces,
+        keys: &[
+            (Key::plain(Char('n')), C::NextWorkspace),
+            (Key::plain(Char('p')), C::PrevWorkspace),
+            (Key::plain(KeyCode::Right), C::NextWorkspace),
+            (Key::plain(KeyCode::Left), C::PrevWorkspace),
+        ],
+    },
+    Binding {
+        label: "⌫",
+        description: "back",
+        group: Group::Workspaces,
+        keys: &[(Key::plain(KeyCode::Backspace), C::Back)],
+    },
+    Binding {
+        label: "Esc",
+        description: "cancel",
+        group: Group::Workspaces,
+        keys: &[(Key::plain(Esc), C::Cancel)],
+    },
 ];
 
-/// The command bound to `event` after the prefix.
-pub fn lookup(event: KeyEvent) -> Option<Command> {
+/// The command bound to `event` in `menu`.
+pub fn lookup(menu: Menu, event: KeyEvent) -> Option<Command> {
     BINDINGS
         .iter()
+        .filter(|binding| binding.group.menu() == menu)
         .flat_map(|binding| binding.keys)
         .find(|(key, _)| key.matches(event))
         .map(|&(_, command)| command)
@@ -303,8 +451,15 @@ pub fn reference() -> String {
         .max()
         .unwrap_or(0);
     let mut out = format!("Press {PREFIX_LABEL}, then:\n");
-    for group in Group::ALL {
-        out.push_str(&format!("\n{}\n", group.title()));
+    for &group in Menu::ALL.iter().flat_map(|m| m.groups()) {
+        match group.menu() {
+            Menu::Root => out.push_str(&format!("\n{}\n", group.title())),
+            menu => out.push_str(&format!(
+                "\n{} ({PREFIX_LABEL}, {}, then)\n",
+                group.title(),
+                menu.path()
+            )),
+        }
         for binding in in_group(group) {
             let pad = width - binding.label.chars().count();
             out.push_str(&format!(
@@ -316,7 +471,7 @@ pub fn reference() -> String {
         }
     }
     out.push_str(
-        "\nFocus and resize repeat: for a moment afterwards, arrow keys work without the prefix.\n",
+        "\nFocus, move and resize repeat: for a moment afterwards, the same keys work without the prefix.\n",
     );
     out
 }
@@ -332,58 +487,102 @@ mod tests {
     #[test]
     fn looks_up_commands() {
         let none = KeyModifiers::NONE;
-        assert_eq!(lookup(event(Char('%'), none)), Some(C::SplitRow));
-        assert_eq!(lookup(event(KeyCode::Left, none)), Some(C::Focus(Left)));
         assert_eq!(
-            lookup(event(KeyCode::Up, KeyModifiers::CONTROL)),
+            lookup(Menu::Root, event(Char('%'), none)),
+            Some(C::SplitRow)
+        );
+        assert_eq!(
+            lookup(Menu::Root, event(KeyCode::Left, none)),
+            Some(C::Focus(Left))
+        );
+        assert_eq!(
+            lookup(Menu::Root, event(KeyCode::Up, KeyModifiers::CONTROL)),
             Some(C::Resize(Up, 1))
         );
         assert_eq!(
-            lookup(event(KeyCode::Up, KeyModifiers::ALT)),
+            lookup(Menu::Root, event(KeyCode::Up, KeyModifiers::ALT)),
             Some(C::Resize(Up, 5))
         );
         assert_eq!(
-            lookup(event(Char('b'), KeyModifiers::CONTROL)),
+            lookup(Menu::Root, event(Char('b'), KeyModifiers::CONTROL)),
             Some(C::SendPrefix)
         );
-        assert_eq!(lookup(event(Char('z'), none)), None);
+        assert_eq!(lookup(Menu::Root, event(Char('z'), none)), None);
     }
 
     #[test]
     fn shift_is_ignored_but_ctrl_and_alt_are_not() {
         assert_eq!(
-            lookup(event(Char('%'), KeyModifiers::SHIFT)),
+            lookup(Menu::Root, event(Char('%'), KeyModifiers::SHIFT)),
             Some(C::SplitRow)
         );
-        assert_eq!(lookup(event(Char('Q'), KeyModifiers::SHIFT)), Some(C::Quit));
         assert_eq!(
-            lookup(event(Char('q'), KeyModifiers::NONE)),
+            lookup(Menu::Root, event(Char('Q'), KeyModifiers::SHIFT)),
+            Some(C::Quit)
+        );
+        assert_eq!(
+            lookup(Menu::Root, event(Char('q'), KeyModifiers::NONE)),
             Some(C::SessionMenu)
         );
-        assert_eq!(lookup(event(Char('x'), KeyModifiers::CONTROL)), None);
+        assert_eq!(
+            lookup(Menu::Root, event(Char('x'), KeyModifiers::CONTROL)),
+            None
+        );
     }
 
     #[test]
     fn shift_counts_for_arrows() {
         assert_eq!(
-            lookup(event(KeyCode::Left, KeyModifiers::NONE)),
+            lookup(Menu::Root, event(KeyCode::Left, KeyModifiers::NONE)),
             Some(C::Focus(Left))
         );
         assert_eq!(
-            lookup(event(KeyCode::Left, KeyModifiers::SHIFT)),
+            lookup(Menu::Root, event(KeyCode::Left, KeyModifiers::SHIFT)),
             Some(C::Move(Left, 1))
         );
     }
 
     #[test]
-    fn every_key_is_bound_once() {
-        let keys: Vec<Key> = BINDINGS
-            .iter()
-            .flat_map(|b| b.keys)
-            .map(|&(k, _)| k)
-            .collect();
-        for (i, key) in keys.iter().enumerate() {
-            assert!(!keys[i + 1..].contains(key), "{key:?} is bound twice");
+    fn submenus_have_their_own_keys() {
+        let none = KeyModifiers::NONE;
+        assert_eq!(
+            lookup(Menu::Root, event(Char('f'), none)),
+            Some(C::Open(Menu::Floating))
+        );
+        assert_eq!(
+            lookup(Menu::Floating, event(Char('f'), none)),
+            Some(C::ToggleFloat)
+        );
+        assert_eq!(
+            lookup(Menu::Floating, event(KeyCode::Left, none)),
+            Some(C::Move(Left, 1))
+        );
+        assert_eq!(
+            lookup(Menu::Workspaces, event(Char('3'), none)),
+            Some(C::Workspace(3))
+        );
+        assert_eq!(
+            lookup(Menu::Workspaces, event(KeyCode::Backspace, none)),
+            Some(C::Back)
+        );
+        assert_eq!(lookup(Menu::Workspaces, event(Char('%'), none)), None);
+    }
+
+    #[test]
+    fn every_key_is_bound_once_per_menu() {
+        for menu in Menu::ALL {
+            let keys: Vec<Key> = BINDINGS
+                .iter()
+                .filter(|b| b.group.menu() == menu)
+                .flat_map(|b| b.keys)
+                .map(|&(k, _)| k)
+                .collect();
+            for (i, key) in keys.iter().enumerate() {
+                assert!(
+                    !keys[i + 1..].contains(key),
+                    "{key:?} is bound twice in {menu:?}"
+                );
+            }
         }
     }
 

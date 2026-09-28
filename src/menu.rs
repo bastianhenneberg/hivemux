@@ -7,7 +7,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Clear, Padding, Paragraph};
 
-use crate::bindings::{Binding, Group, PREFIX_LABEL, in_group};
+use crate::bindings::{Binding, Group, Menu, PREFIX_LABEL, in_group};
 use crate::config::{Config, SETTINGS, Side};
 
 pub const HONEY: Color = Color::Rgb(250, 190, 0);
@@ -17,10 +17,10 @@ const GAP: usize = 2;
 const GROUP_GAP: usize = 4;
 
 /// The which-key popup in the bottom corner of `area` on `side`.
-pub fn draw_which_key(frame: &mut Frame, area: Rect, side: Side) {
+pub fn draw_which_key(frame: &mut Frame, area: Rect, side: Side, menu: Menu) {
     let area = inset(area);
     // Border and one column of padding on each side.
-    let lines = groups(usize::from(area.width).saturating_sub(4));
+    let lines = groups(menu.groups(), usize::from(area.width).saturating_sub(4));
 
     let width = lines.iter().map(Line::width).max().unwrap_or(0) as u16 + 4;
     let height = lines.len() as u16 + 2;
@@ -32,7 +32,11 @@ pub fn draw_which_key(frame: &mut Frame, area: Rect, side: Side) {
     };
     let popup = Rect::new(x, area.bottom() - height, width, height);
 
-    draw_box(frame, popup, format!(" ⬢ {PREFIX_LABEL} "), 1, lines);
+    let title = match menu {
+        Menu::Root => format!(" ⬢ {PREFIX_LABEL} "),
+        menu => format!(" ⬢ {PREFIX_LABEL} {} ", menu.path()),
+    };
+    draw_box(frame, popup, title, 1, lines);
 }
 
 /// The full key reference in the middle of `area`.
@@ -48,7 +52,15 @@ pub fn draw_help(frame: &mut Frame, area: Rect) {
         Line::default(),
     ];
     // Border and two columns of padding on each side.
-    lines.extend(groups(usize::from(area.width).saturating_sub(6)));
+    let max_width = usize::from(area.width).saturating_sub(6);
+    lines.extend(groups(Menu::Root.groups(), max_width));
+    let submenus: Vec<Group> = Menu::ALL
+        .iter()
+        .filter(|m| **m != Menu::Root)
+        .flat_map(|m| m.groups().iter().copied())
+        .collect();
+    lines.push(Line::default());
+    lines.extend(groups(&submenus, max_width));
     lines.extend([
         Line::default(),
         Line::styled("Focus and resize repeat: for a moment afterwards,", dim),
@@ -99,8 +111,8 @@ fn draw_box(
 
 /// All groups, side by side when they fit into `max_width`, stacked
 /// otherwise.
-fn groups(max_width: usize) -> Vec<Line<'static>> {
-    let columns: Vec<Vec<Line>> = Group::ALL.iter().map(|&g| group_lines(g)).collect();
+fn groups(groups: &[Group], max_width: usize) -> Vec<Line<'static>> {
+    let columns: Vec<Vec<Line>> = groups.iter().map(|&g| group_lines(g)).collect();
     let widths: Vec<usize> = columns
         .iter()
         .map(|lines| lines.iter().map(Line::width).max().unwrap_or(0))
@@ -261,8 +273,12 @@ fn group_lines(group: Group) -> Vec<Line<'static>> {
         .max()
         .unwrap_or(0);
 
+    let title = match group.menu() {
+        Menu::Root => group.title().to_owned(),
+        menu => format!("{} ({})", group.title(), menu.path()),
+    };
     let mut lines = vec![Line::styled(
-        group.title(),
+        title,
         Style::new().add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
     )];
     for binding in bindings {
@@ -328,7 +344,9 @@ mod tests {
 
     #[test]
     fn which_key_fits_side_by_side_on_a_wide_screen() {
-        let screen = render(120, 30, |f, a| draw_which_key(f, a, Side::Right));
+        let screen = render(120, 30, |f, a| {
+            draw_which_key(f, a, Side::Right, Menu::Root)
+        });
         let row = screen
             .lines()
             .find(|l| l.contains("Panes"))
@@ -340,7 +358,7 @@ mod tests {
 
     #[test]
     fn which_key_stacks_on_a_narrow_screen() {
-        let screen = render(40, 40, |f, a| draw_which_key(f, a, Side::Left));
+        let screen = render(40, 40, |f, a| draw_which_key(f, a, Side::Left, Menu::Root));
         let row = screen
             .lines()
             .find(|l| l.contains("Panes"))
@@ -351,14 +369,25 @@ mod tests {
 
     #[test]
     fn which_key_opens_on_the_chosen_side() {
-        let left = render(120, 30, |f, a| draw_which_key(f, a, Side::Left));
-        let right = render(120, 30, |f, a| draw_which_key(f, a, Side::Right));
+        let left = render(120, 30, |f, a| draw_which_key(f, a, Side::Left, Menu::Root));
+        let right = render(120, 30, |f, a| {
+            draw_which_key(f, a, Side::Right, Menu::Root)
+        });
         let corner = |screen: &str| {
             let row = screen.lines().find(|l| l.contains("Ctrl+B")).unwrap();
             row.chars().position(|c| c == '╭').unwrap()
         };
         assert_eq!(corner(&left), 1);
         assert!(corner(&right) > corner(&left));
+    }
+
+    #[test]
+    fn which_key_shows_the_open_submenu() {
+        let screen = render(120, 30, |f, a| {
+            draw_which_key(f, a, Side::Left, Menu::Floating)
+        });
+        assert!(screen.contains("next floating pane"));
+        assert!(!screen.contains("split side by side"));
     }
 
     #[test]

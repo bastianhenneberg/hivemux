@@ -103,6 +103,20 @@ impl Workspace {
         }
     }
 
+    /// Focuses the next floating pane. From a tiled pane that is the top
+    /// one, from a floating pane the bottom one, which then comes to the top,
+    /// so pressing it again goes through all of them.
+    pub fn next_float(&mut self) {
+        let next = if self.is_floating(self.focus) {
+            self.floats.first()
+        } else {
+            self.floats.last()
+        };
+        if let Some(next) = next.map(|f| f.id) {
+            self.focus(next);
+        }
+    }
+
     /// Splits the focused tiled pane and focuses `new`.
     pub fn split(&mut self, axis: Axis, new: PaneId) -> bool {
         if !self.layout.split(self.focus, axis, new) {
@@ -241,6 +255,22 @@ mod tests {
         ws.focus(2);
         let order: Vec<PaneId> = ws.rects(BODY).iter().map(|(id, _)| *id).collect();
         assert_eq!(order, vec![1, 3, 2]);
+    }
+
+    #[test]
+    fn next_float_goes_through_all_floats() {
+        let mut ws = Workspace::new(1);
+        ws.add_float(2, BODY);
+        ws.add_float(3, BODY);
+        ws.add_float(4, BODY);
+        ws.focus(1);
+        let mut seen = Vec::new();
+        for _ in 0..3 {
+            ws.next_float();
+            seen.push(ws.focus);
+        }
+        seen.sort_unstable();
+        assert_eq!(seen, vec![2, 3, 4]);
     }
 
     #[test]
