@@ -15,7 +15,7 @@ use ratatui::crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModif
 use ratatui::layout::{Constraint, Layout as UiLayout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, BorderType};
+use ratatui::widgets::{Block, BorderType, Clear, Padding, Paragraph};
 use ratatui::{Frame, Terminal, TerminalOptions, Viewport};
 
 use crate::keys;
@@ -51,6 +51,15 @@ enum Mode {
     Prefix,
     /// A repeatable command just ran, arrow keys repeat it until the deadline.
     Repeat(Instant),
+    /// A destructive action waits for the user to confirm it with `y`.
+    Confirm(Action),
+}
+
+/// Actions that destroy something and are therefore confirmed first.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Action {
+    ClosePane(PaneId),
+    KillServer,
 }
 
 /// The attached client. Rendering goes through a ratatui terminal whose
@@ -304,6 +313,13 @@ impl App {
                 self.mode = Mode::Normal;
                 self.command(key)
             }
+            Mode::Confirm(action) => {
+                self.mode = Mode::Normal;
+                if matches!(key.code, KeyCode::Char('y' | 'Y')) {
+                    self.perform(action);
+                }
+                Ok(())
+            }
             Mode::Repeat(until) if Instant::now() < until && arrow(key.code).is_some() => {
                 self.command(key)
             }
@@ -353,11 +369,19 @@ impl App {
             KeyCode::Char('q' | 'd') => self.detach(),
             KeyCode::Char('%') => self.split(Axis::Row),
             KeyCode::Char('"') => self.split(Axis::Column),
-            KeyCode::Char('x') => self.close(self.focus),
+            KeyCode::Char('x') => self.mode = Mode::Confirm(Action::ClosePane(self.focus)),
+            KeyCode::Char('Q') => self.mode = Mode::Confirm(Action::KillServer),
             KeyCode::Char('o') => self.cycle_focus(),
             _ => {}
         }
         Ok(())
+    }
+
+    fn perform(&mut self, action: Action) {
+        match action {
+            Action::ClosePane(id) => self.close(id),
+            Action::KillServer => self.quit = true,
+        }
     }
 
     /// Splits the focused pane and focuses the new one. Does nothing if the
@@ -463,12 +487,75 @@ impl App {
             let view = ScreenView::new(parser.screen());
             let cursor = view.cursor(inner);
             frame.render_widget(view, inner);
-            if focused && let Some(position) = cursor {
+            if focused
+                && !matches!(self.mode, Mode::Confirm(_))
+                && let Some(position) = cursor
+            {
                 frame.set_cursor_position(position);
             }
         }
 
         frame.render_widget(self.status_line(), status_area);
+
+        if let Mode::Confirm(action) = self.mode {
+            self.draw_confirm(frame, body, action);
+        }
+    }
+
+    /// A warning box in the middle of the screen, asking to confirm `action`.
+    fn draw_confirm(&self, frame: &mut Frame, area: Rect, action: Action) {
+        let shells = self.panes.len();
+        let (title, lines) = match action {
+            Action::ClosePane(id) => (
+                " Close pane ",
+                vec![Line::from(format!(
+                    "Close pane {id} and end the program running in it?"
+                ))],
+            ),
+            Action::KillServer => (
+                " Quit hivemux ",
+                vec![
+                    Line::from(format!(
+                        "End the session and all {shells} {} in it?",
+                        if shells == 1 { "shell" } else { "shells" }
+                    )),
+                    Line::from(Span::styled(
+                        "To keep them running, detach with ^B q instead.",
+                        Style::new().add_modifier(Modifier::DIM),
+                    )),
+                ],
+            ),
+        };
+
+        let warning = Style::new()
+            .fg(Color::LightRed)
+            .add_modifier(Modifier::BOLD);
+        let mut text = lines;
+        text.push(Line::default());
+        text.push(Line::from(vec![
+            Span::styled(
+                " y ",
+                Style::new()
+                    .fg(Color::Black)
+                    .bg(Color::LightRed)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(" yes    "),
+            Span::styled("any other key", Style::new().add_modifier(Modifier::BOLD)),
+            Span::raw(" cancel"),
+        ]));
+
+        let width = text.iter().map(Line::width).max().unwrap_or(0) as u16 + 6;
+        let height = text.len() as u16 + 2;
+        let popup = centered(area, width, height);
+
+        let block = Block::bordered()
+            .border_type(BorderType::Rounded)
+            .border_style(warning)
+            .title(Span::styled(format!(" ⚠{title}"), warning))
+            .padding(Padding::horizontal(2));
+        frame.render_widget(Clear, popup);
+        frame.render_widget(Paragraph::new(text).block(block), popup);
     }
 
     fn status_line(&self) -> Line<'static> {
@@ -482,8 +569,21 @@ impl App {
             Mode::Prefix => {
                 spans.push(Span::styled(" PREFIX ", badge));
                 spans.push(Span::styled(
-                    "  % split │  \" split ─  x close  o next  ←↑↓→ focus  ^←↑↓→ resize  q/d detach",
+                    "  % split │  \" split ─  x close  o next  ←↑↓→ focus  ^←↑↓→ resize  q/d detach  Q quit",
                     Style::new().fg(HONEY),
+                ));
+            }
+            Mode::Confirm(_) => {
+                spans.push(Span::styled(
+                    " CONFIRM ",
+                    Style::new()
+                        .fg(Color::Black)
+                        .bg(Color::LightRed)
+                        .add_modifier(Modifier::BOLD),
+                ));
+                spans.push(Span::styled(
+                    "  y yes · any other key cancels",
+                    Style::new().fg(Color::LightRed),
                 ));
             }
             Mode::Repeat(_) => {
@@ -510,6 +610,18 @@ impl App {
         }
         Line::from(spans)
     }
+}
+
+/// A `width` x `height` rect in the middle of `area`, shrunk to fit.
+fn centered(area: Rect, width: u16, height: u16) -> Rect {
+    let width = width.min(area.width);
+    let height = height.min(area.height);
+    Rect::new(
+        area.x + (area.width - width) / 2,
+        area.y + (area.height - height) / 2,
+        width,
+        height,
+    )
 }
 
 fn is_prefix(key: KeyEvent) -> bool {

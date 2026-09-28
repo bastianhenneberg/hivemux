@@ -46,11 +46,12 @@ a time, attaching from a second terminal detaches the first.
 |---|---|
 | `Ctrl+B` `%` | Split the pane side by side |
 | `Ctrl+B` `"` | Split the pane top and bottom |
-| `Ctrl+B` `x` | Close the pane |
+| `Ctrl+B` `x` | Close the pane (asks first) |
 | `Ctrl+B` `←↑↓→` | Focus the pane in that direction |
 | `Ctrl+B` `o` | Focus the next pane |
 | `Ctrl+B` `Ctrl+←↑↓→` | Resize by one cell (`Alt` for five) |
 | `Ctrl+B` `q` or `d` | Detach, the shells keep running |
+| `Ctrl+B` `Q` | Quit: end the session and every shell in it (asks first) |
 | `Ctrl+B` `Ctrl+B` | Send `Ctrl+B` to the shell |
 
 Focus and resize repeat: for 600 ms after one of them, arrow keys work without the prefix.
