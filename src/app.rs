@@ -1470,6 +1470,32 @@ impl App {
                 self.mode = Mode::Sessions(selected);
             }
             Command::Hives => self.mode = Mode::Hives(0),
+            Command::NewSession => {
+                self.prompt = Some(Prompt {
+                    purpose: PromptFor::NewSession,
+                    text: String::new(),
+                });
+                self.mode = Mode::Prompt;
+            }
+            Command::RenameSession => {
+                let name = protocol::session_name();
+                self.prompt = Some(Prompt {
+                    purpose: PromptFor::RenameSession(name.clone()),
+                    text: name,
+                });
+                self.mode = Mode::Prompt;
+            }
+            Command::EndSession => {
+                self.confirm_target = Some(protocol::session_name());
+                self.mode = Mode::Confirm(Action::EndSession);
+            }
+            Command::SaveHive => {
+                self.prompt = Some(Prompt {
+                    purpose: PromptFor::SaveHive,
+                    text: String::new(),
+                });
+                self.mode = Mode::Prompt;
+            }
             Command::PickPane => {
                 self.picker = Some(Picker {
                     query: String::new(),
@@ -3481,15 +3507,7 @@ impl App {
                     " ⬢ Sessions ",
                     &items,
                     selected,
-                    &[
-                        ("↑↓", "select"),
-                        ("Enter", "or key switch"),
-                        ("x", "end"),
-                        ("r", "rename"),
-                        ("s", "save as hive"),
-                        ("h", "hives"),
-                        ("Esc", "cancel"),
-                    ],
+                    bindings::SESSION_LIST_KEYS,
                 );
             }
             Mode::Hives(selected) => {
@@ -3508,15 +3526,7 @@ impl App {
                     " ⬢ Hives ",
                     &items,
                     selected.min(items.len() - 1),
-                    &[
-                        ("↑↓", "select"),
-                        ("Enter", "or digit bring back"),
-                        ("s", "save new"),
-                        ("u", "update"),
-                        ("r", "rename"),
-                        ("x", "delete"),
-                        ("Esc", "cancel"),
-                    ],
+                    bindings::HIVE_LIST_KEYS,
                 );
             }
             Mode::Prefix(_) | Mode::Normal | Mode::Repeat(..) | Mode::Copy | Mode::Sidebar(_) => {}
@@ -3851,7 +3861,7 @@ impl App {
             Mode::Sessions(_) => (
                 "SESSIONS",
                 t.magenta,
-                "↑↓ choose · Enter switch · n new · x end · r rename · s save as hive · h hives · Esc cancel",
+                "↑↓ choose · Enter switch · n new · x end · r rename · s save all as hive · h hives · Esc cancel",
             ),
             Mode::Hives(_) => (
                 "HIVES",

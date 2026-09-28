@@ -32,6 +32,14 @@ pub enum Command {
     RenamePane,
     Sessions,
     Hives,
+    /// Start a new session, asking for its name.
+    NewSession,
+    /// Rename this session.
+    RenameSession,
+    /// End this session, asking first.
+    EndSession,
+    /// Save every running session as a hive, asking for its name.
+    SaveHive,
     PickPane,
     ReloadConfig,
     ScrollbackEditor,
@@ -86,10 +94,18 @@ pub enum Menu {
     Workspaces,
     /// The user's own commands from `[[commands]]` in the config.
     Commands,
+    /// Sessions and hives.
+    Session,
 }
 
 impl Menu {
-    pub const ALL: [Menu; 4] = [Menu::Root, Menu::Floating, Menu::Workspaces, Menu::Commands];
+    pub const ALL: [Menu; 5] = [
+        Menu::Root,
+        Menu::Floating,
+        Menu::Workspaces,
+        Menu::Session,
+        Menu::Commands,
+    ];
 
     pub fn groups(self) -> &'static [Group] {
         match self {
@@ -97,6 +113,7 @@ impl Menu {
             Menu::Floating => &[Group::Floating],
             Menu::Workspaces => &[Group::Workspaces],
             Menu::Commands => &[Group::Commands],
+            Menu::Session => &[Group::Sessions],
         }
     }
 
@@ -107,6 +124,7 @@ impl Menu {
             Menu::Floating => "f",
             Menu::Workspaces => "w",
             Menu::Commands => "c",
+            Menu::Session => "s",
         }
     }
 }
@@ -123,6 +141,8 @@ pub enum Group {
     Floating,
     Workspaces,
     Commands,
+    /// The session submenu.
+    Sessions,
 }
 
 impl Group {
@@ -136,6 +156,7 @@ impl Group {
             Group::Floating => "Floating panes",
             Group::Workspaces => "Workspaces",
             Group::Commands => "Your commands",
+            Group::Sessions => "Sessions and hives",
         }
     }
 
@@ -146,7 +167,7 @@ impl Group {
             Group::Panes | Group::Workspaces => t.blue,
             Group::Navigate | Group::Floating => t.cyan,
             Group::View => t.orange,
-            Group::Session | Group::Commands => t.magenta,
+            Group::Session | Group::Commands | Group::Sessions => t.magenta,
             Group::More => t.muted,
         }
     }
@@ -159,6 +180,7 @@ impl Group {
             Group::Floating => Menu::Floating,
             Group::Workspaces => Menu::Workspaces,
             Group::Commands => Menu::Commands,
+            Group::Sessions => Menu::Session,
         }
     }
 }
@@ -382,16 +404,10 @@ pub const BINDINGS: &[Binding] = &[
         keys: &[(Key::plain(Char('d')), C::Detach)],
     },
     Binding {
-        label: "S",
-        description: "sessions…",
+        label: "s",
+        description: "session…",
         group: Group::Session,
-        keys: &[(Key::plain(Char('S')), C::Sessions)],
-    },
-    Binding {
-        label: "H",
-        description: "hives…",
-        group: Group::Session,
-        keys: &[(Key::plain(Char('H')), C::Hives)],
+        keys: &[(Key::plain(Char('s')), C::Open(Menu::Session))],
     },
     Binding {
         label: "c",
@@ -412,6 +428,18 @@ pub const BINDINGS: &[Binding] = &[
         keys: &[(Key::plain(Char('?')), C::Help)],
     },
     // Listed in the footer only.
+    Binding {
+        label: "S",
+        description: "session list",
+        group: Group::More,
+        keys: &[(Key::plain(Char('S')), C::Sessions)],
+    },
+    Binding {
+        label: "H",
+        description: "hives",
+        group: Group::More,
+        keys: &[(Key::plain(Char('H')), C::Hives)],
+    },
     Binding {
         label: "Ctrl/Alt ←↑↓→",
         description: "resize",
@@ -595,6 +623,100 @@ pub const BINDINGS: &[Binding] = &[
         group: Group::Workspaces,
         keys: &[(Key::plain(Esc), C::Cancel)],
     },
+    // The session submenu.
+    Binding {
+        label: "s S",
+        description: "switch…",
+        group: Group::Sessions,
+        keys: &[
+            (Key::plain(Char('s')), C::Sessions),
+            (Key::plain(Char('S')), C::Sessions),
+        ],
+    },
+    Binding {
+        label: "n",
+        description: "new session…",
+        group: Group::Sessions,
+        keys: &[(Key::plain(Char('n')), C::NewSession)],
+    },
+    Binding {
+        label: "r",
+        description: "rename this session",
+        group: Group::Sessions,
+        keys: &[(Key::plain(Char('r')), C::RenameSession)],
+    },
+    Binding {
+        label: "x",
+        description: "end this session",
+        group: Group::Sessions,
+        keys: &[(Key::plain(Char('x')), C::EndSession)],
+    },
+    Binding {
+        label: "d",
+        description: "detach",
+        group: Group::Sessions,
+        keys: &[(Key::plain(Char('d')), C::Detach)],
+    },
+    Binding {
+        label: "h H",
+        description: "hives…",
+        group: Group::Sessions,
+        keys: &[
+            (Key::plain(Char('h')), C::Hives),
+            (Key::plain(Char('H')), C::Hives),
+        ],
+    },
+    Binding {
+        label: "a",
+        description: "save all as hive…",
+        group: Group::Sessions,
+        keys: &[(Key::plain(Char('a')), C::SaveHive)],
+    },
+    Binding {
+        label: "⌫",
+        description: "back",
+        group: Group::Sessions,
+        keys: &[(Key::plain(KeyCode::Backspace), C::Back)],
+    },
+    Binding {
+        label: "Esc",
+        description: "cancel",
+        group: Group::Sessions,
+        keys: &[(Key::plain(Esc), C::Cancel)],
+    },
+];
+
+/// A key and what it does, as a menu's footer shows it.
+pub type KeyHint = (&'static str, &'static str);
+
+/// The keys of the session list (`Ctrl+B S`) besides its entries. Its
+/// popup, the help and `hivemux keys` all show this list.
+pub const SESSION_LIST_KEYS: &[KeyHint] = &[
+    ("↑↓", "select"),
+    ("Enter", "or key switch"),
+    ("x", "end"),
+    ("r", "rename"),
+    ("s", "save all as hive"),
+    ("h", "hives"),
+    ("Esc", "cancel"),
+];
+
+/// The keys of the hives list (`Ctrl+B H`) besides its entries.
+pub const HIVE_LIST_KEYS: &[KeyHint] = &[
+    ("↑↓", "select"),
+    ("Enter", "or digit bring back"),
+    ("s", "save new"),
+    ("u", "update"),
+    ("r", "rename"),
+    ("x", "delete"),
+    ("Esc", "cancel"),
+];
+
+/// The lists with keys of their own, for the help: title, how to open it,
+/// its keys.
+pub const LISTS: &[(&str, &str, &[KeyHint])] = &[
+    ("Session list", "S", SESSION_LIST_KEYS),
+    ("Hives", "H", HIVE_LIST_KEYS),
 ];
 
 /// The command bound to `event` in `menu`.
@@ -642,6 +764,13 @@ pub fn reference() -> String {
                 " ".repeat(pad),
                 binding.description
             ));
+        }
+    }
+    for (title, key, keys) in LISTS {
+        out.push_str(&format!("\n{title} ({PREFIX_LABEL}, {key}), in the list\n"));
+        for (label, description) in *keys {
+            let pad = width.saturating_sub(label.chars().count());
+            out.push_str(&format!("  {label}{}  {description}\n", " ".repeat(pad)));
         }
     }
     out.push_str(
@@ -745,6 +874,33 @@ mod tests {
             Some(C::Back)
         );
         assert_eq!(lookup(Menu::Workspaces, event(Char('%'), none)), None);
+    }
+
+    #[test]
+    fn session_menu_has_its_commands_and_the_old_keys_still_work() {
+        let none = KeyModifiers::NONE;
+        assert_eq!(
+            lookup(Menu::Root, event(Char('s'), none)),
+            Some(C::Open(Menu::Session))
+        );
+        assert_eq!(
+            lookup(Menu::Root, event(Char('S'), none)),
+            Some(C::Sessions)
+        );
+        assert_eq!(lookup(Menu::Root, event(Char('H'), none)), Some(C::Hives));
+        assert_eq!(
+            lookup(Menu::Session, event(Char('r'), none)),
+            Some(C::RenameSession)
+        );
+        assert_eq!(
+            lookup(Menu::Session, event(Char('x'), none)),
+            Some(C::EndSession)
+        );
+        assert_eq!(
+            lookup(Menu::Session, event(Char('a'), none)),
+            Some(C::SaveHive)
+        );
+        assert!(reference().contains("save new") && reference().contains("or key switch"));
     }
 
     #[test]

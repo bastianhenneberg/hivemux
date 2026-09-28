@@ -86,6 +86,20 @@ pub fn draw_help(frame: &mut Frame, area: Rect, scroll: u16) {
         .collect();
     lines.push(Line::default());
     lines.extend(groups(&submenus, max_width));
+    // The lists take keys of their own once they are open.
+    for (title, key, keys) in crate::bindings::LISTS {
+        lines.push(Line::default());
+        lines.push(Line::from(vec![
+            Span::styled(
+                (*title).to_owned(),
+                Style::new()
+                    .fg(Group::Sessions.color())
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(format!("  {PREFIX_LABEL} {key}, then in the list"), dim),
+        ]));
+        lines.extend(key_lines(keys, max_width));
+    }
     lines.extend([
         Line::default(),
         Line::styled("Focus and resize repeat: for a moment afterwards,", dim),
@@ -638,6 +652,14 @@ mod tests {
         let last = SETTINGS.len() - 1;
         let screen = render(80, 12, |f, a| draw_settings(f, a, &config, last, None));
         assert!(screen.contains(SETTINGS[last].name));
+    }
+
+    #[test]
+    fn help_lists_the_keys_inside_the_lists() {
+        let screen = render(120, 80, |f, a| draw_help(f, a, 0));
+        assert!(screen.contains("Session list") && screen.contains("Hives"));
+        assert!(screen.contains("save all as hive") && screen.contains("bring back"));
+        assert!(screen.contains("rename this session"));
     }
 
     #[test]

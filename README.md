@@ -81,8 +81,9 @@ another one), `s` saves all running sessions as a hive and `h` opens the hives.
 | `Ctrl+B` `b` | Show or hide the sidebar |
 | `Ctrl+B` `e` | Into the sidebar: `j`/`k` move, `Enter` go, `r` name, `x` close, `Esc` back |
 | `Ctrl+B` `F` | Focus mode: only the focused pane, no bars, sidebar or borders; again to leave |
-| `Ctrl+B` `S` | Sessions: switch, start, end, rename, save as a hive |
-| `Ctrl+B` `H` | Hives: bring back, save, update, rename or delete saved groups of sessions |
+| `Ctrl+B` `s` | Session menu: switch, new, rename or end this session, detach, hives, save all as a hive |
+| `Ctrl+B` `S` | Session list straight away: switch, end, rename, save as a hive |
+| `Ctrl+B` `H` | Hives straight away: bring back, save, update, rename or delete saved groups of sessions |
 | `Ctrl+B` `,` | Settings |
 | `Ctrl+B` `R` | Reload the config file |
 | `Ctrl+B` `?` | Show all keys |
