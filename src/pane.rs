@@ -236,6 +236,31 @@ impl Pane {
         text_between(&mut self.parser.lock().unwrap(), start, end)
     }
 
+    /// Every row of history and screen as text, by absolute row, for search.
+    pub fn rows_text(&self) -> Vec<String> {
+        let mut parser = self.parser.lock().unwrap();
+        let history = history_len(&mut parser);
+        let screen = parser.screen_mut();
+        let saved = screen.scrollback();
+        let (rows, cols) = screen.size();
+        let total = history + usize::from(rows);
+        let mut out = vec![String::new(); total];
+        let mut top = 0;
+        // Page through the history a screen at a time.
+        while top < total {
+            screen.set_scrollback(history.saturating_sub(top));
+            let view_top = history - screen.scrollback();
+            for (i, row) in screen.rows(0, cols).enumerate() {
+                if let Some(slot) = out.get_mut(view_top + i) {
+                    *slot = row;
+                }
+            }
+            top = view_top + usize::from(rows);
+        }
+        screen.set_scrollback(saved);
+        out
+    }
+
     /// The visible screen as text, or the last `lines` lines of history and
     /// screen together.
     pub fn read(&self, lines: Option<usize>) -> String {

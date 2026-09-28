@@ -30,6 +30,7 @@ pub enum Command {
     PrevWorkspace,
     NextFloat,
     RenamePane,
+    ReloadConfig,
     ScrollbackEditor,
     Zoom,
     Swap(bool),
@@ -395,6 +396,12 @@ pub const BINDINGS: &[Binding] = &[
         description: "settings",
         group: Group::Session,
         keys: &[(Key::plain(Char(',')), C::Settings)],
+    },
+    Binding {
+        label: "R",
+        description: "reload config",
+        group: Group::Session,
+        keys: &[(Key::plain(Char('R')), C::ReloadConfig)],
     },
     Binding {
         label: "?",

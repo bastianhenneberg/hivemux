@@ -82,10 +82,19 @@ enum Mode {
     Sidebar(usize),
 }
 
-/// A line of text being typed, for renaming.
+/// A line of text being typed.
 struct Prompt {
-    target: RenameTarget,
+    purpose: PromptFor,
     text: String,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PromptFor {
+    Rename(RenameTarget),
+    /// Searching the copy mode's pane, down or up.
+    Search {
+        forward: bool,
+    },
 }
 
 /// A mouse drag in progress.
@@ -98,6 +107,8 @@ enum Drag {
     Resize { id: PaneId },
     /// Selecting text.
     Select,
+    /// Moving the divider between tiled panes at this path in the layout.
+    Divider,
 }
 
 /// Selected text in a pane, from `anchor` to `head`, as (absolute row,
@@ -237,12 +248,20 @@ pub struct App {
     config_note: Option<String>,
     mode: Mode,
     drag: Option<Drag>,
+    /// The divider being dragged, see `Layout::divider_at`.
+    divider: Vec<bool>,
     selection: Option<Selection>,
     copy: Option<CopyCursor>,
     /// A short message for the control bar, e.g. what was copied. Cleared by
     /// the next key.
     flash: Option<String>,
     prompt: Option<Prompt>,
+    /// The last copy mode search and its direction, for n and N.
+    search: Option<(String, bool)>,
+    /// When and where the left button went down last, to spot double clicks.
+    last_click: Option<(Instant, Position)>,
+    /// The title last sent to the client's terminal window.
+    window_title: String,
     quit: bool,
 }
 
@@ -284,10 +303,14 @@ impl App {
             config_note: config_error.map(|e| format!("config ignored: {e}")),
             mode: Mode::Normal,
             drag: None,
+            divider: Vec::new(),
             selection: None,
             copy: None,
             flash: None,
             prompt: None,
+            search: None,
+            last_click: None,
+            window_title: String::new(),
             quit: false,
         };
         app.apply_theme();
@@ -495,9 +518,23 @@ impl App {
         let Some(mut client) = self.client.take() else {
             return;
         };
-        if client.terminal.draw(|frame| self.draw(frame)).is_ok() {
-            self.client = Some(client);
+        if client.terminal.draw(|frame| self.draw(frame)).is_err() {
+            return;
         }
+        // The terminal window's title names the workspace and the pane.
+        let title = self.window_title_text();
+        if title != self.window_title {
+            let clean: String = title.chars().filter(|c| !c.is_control()).collect();
+            if client
+                .send(&ServerMsg::Output(
+                    format!("\x1b]2;{clean}\x07").into_bytes(),
+                ))
+                .is_ok()
+            {
+                self.window_title = title;
+            }
+        }
+        self.client = Some(client);
     }
 
     fn handle(&mut self, event: AppEvent) {
@@ -570,6 +607,8 @@ impl App {
         let stream = stream.try_clone()?;
         self.detach();
         let terminal = Client::terminal_for(&stream, self.screen)?;
+        // A new client gets the window title sent afresh.
+        self.window_title.clear();
         self.client = Some(Client {
             id,
             stream,
@@ -1090,6 +1129,15 @@ impl App {
             Command::JumpToWaiting => self.jump_to_waiting(),
             Command::RenamePane => self.start_prompt(RenameTarget::Pane(self.ws.focus)),
             Command::Zoom => self.ws.toggle_zoom(),
+            Command::ReloadConfig => {
+                let (config, error) = Config::load();
+                self.config = config;
+                self.apply_theme();
+                self.flash = Some(match error {
+                    Some(e) => format!("config has an error, using defaults: {e}"),
+                    None => "config reloaded".into(),
+                });
+            }
             Command::ScrollbackEditor => self.scrollback_in_editor(),
             Command::Swap(forward) => self.ws.swap(forward),
             Command::Equalize => self.ws.layout.equalize(),
@@ -1305,6 +1353,29 @@ impl App {
         }
     }
 
+    /// Moves the copy cursor to the next match of the last search, in its
+    /// direction or, with `reverse`, the other way. Wraps around.
+    fn search_next(&mut self, reverse: bool) {
+        let (Some(copy), Some((query, forward))) = (self.copy, self.search.clone()) else {
+            return;
+        };
+        let Some(pane) = self.panes.get(&copy.pane) else {
+            return;
+        };
+        let rows = pane.rows_text();
+        match find_in_rows(&rows, copy.pos, &query, forward != reverse) {
+            Some(pos) => {
+                let copy = CopyCursor {
+                    pane: copy.pane,
+                    pos,
+                };
+                self.copy = Some(copy);
+                self.copy_show(copy);
+            }
+            None => self.flash = Some(format!("{query:?} not found")),
+        }
+    }
+
     /// Scrolls pane so that the copy cursor is in view.
     fn copy_show(&mut self, copy: CopyCursor) {
         let Some(inner) = self.inner_of(copy.pane) else {
@@ -1351,6 +1422,17 @@ impl App {
             KeyCode::Char('$') | KeyCode::End => self.copy_move(0, 10_000),
             KeyCode::Char('g') => self.copy_move(-(isize::MAX / 2), 0),
             KeyCode::Char('G') => self.copy_move(isize::MAX / 2, 0),
+            KeyCode::Char('/' | '?') => {
+                self.prompt = Some(Prompt {
+                    purpose: PromptFor::Search {
+                        forward: key.code == KeyCode::Char('/'),
+                    },
+                    text: String::new(),
+                });
+                self.mode = Mode::Prompt;
+            }
+            KeyCode::Char('n') => self.search_next(false),
+            KeyCode::Char('N') => self.search_next(true),
             KeyCode::Char('v' | ' ') => {
                 self.selection = match self.selection {
                     Some(_) => None,
@@ -1399,6 +1481,15 @@ impl App {
                 let Some((id, rect)) = self.ws.pane_at(pos, self.body) else {
                     return Ok(());
                 };
+                // A border where two tiled panes meet moves when dragged.
+                if !self.ws.is_floating(id)
+                    && self.ws.zoomed.is_none()
+                    && let Some(path) = self.ws.layout.divider_at(pos, self.body)
+                {
+                    self.divider = path;
+                    self.drag = Some(Drag::Divider);
+                    return Ok(());
+                }
                 if self.copy.is_some_and(|c| c.pane != id) {
                     self.leave_copy();
                 }
@@ -1421,6 +1512,14 @@ impl App {
                     return Ok(());
                 }
                 let at = self.to_abs(id, pos.y - inner.y, pos.x - inner.x);
+                let double = self
+                    .last_click
+                    .is_some_and(|(when, at)| at == pos && when.elapsed() < DOUBLE_CLICK);
+                self.last_click = Some((Instant::now(), pos));
+                if double {
+                    self.select_word(id, at);
+                    return Ok(());
+                }
                 self.selection = Some(Selection {
                     pane: id,
                     anchor: at,
@@ -1452,6 +1551,10 @@ impl App {
                         };
                         self.ws.set_float_rect(id, resized, self.body);
                     }
+                }
+                Some(Drag::Divider) => {
+                    let path = self.divider.clone();
+                    self.ws.layout.move_divider(&path, pos, self.body);
                 }
                 Some(Drag::Select) => {
                     let Some(sel) = self.selection else {
@@ -1525,6 +1628,25 @@ impl App {
             _ => self.forward_to_focused(event)?,
         }
         Ok(())
+    }
+
+    /// Selects and copies the word at `at` in pane `id`, for a double click.
+    fn select_word(&mut self, id: PaneId, at: (usize, u16)) {
+        let Some(pane) = self.panes.get(&id) else {
+            return;
+        };
+        let Some(line) = pane.rows_text().into_iter().nth(at.0) else {
+            return;
+        };
+        let Some((start, end)) = word_bounds(&line, usize::from(at.1)) else {
+            return;
+        };
+        self.selection = Some(Selection {
+            pane: id,
+            anchor: (at.0, start as u16),
+            head: (at.0, end as u16),
+        });
+        self.copy_selection();
     }
 
     fn forward_to_focused(&mut self, event: MouseEvent) -> Result<()> {
@@ -1683,7 +1805,10 @@ impl App {
     /// Opens the name prompt for `target`, filled with its current name.
     fn start_prompt(&mut self, target: RenameTarget) {
         let text = self.name_of(target).unwrap_or_default();
-        self.prompt = Some(Prompt { target, text });
+        self.prompt = Some(Prompt {
+            purpose: PromptFor::Rename(target),
+            text,
+        });
         self.mode = Mode::Prompt;
     }
 
@@ -1711,15 +1836,27 @@ impl App {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         match key.code {
             KeyCode::Esc => {
+                let searching = matches!(prompt.purpose, PromptFor::Search { .. });
                 self.prompt = None;
-                self.mode = Mode::Normal;
+                self.mode = if searching { Mode::Copy } else { Mode::Normal };
             }
             KeyCode::Enter => {
-                let Prompt { target, text } = self.prompt.take().expect("checked above");
+                let Prompt { purpose, text } = self.prompt.take().expect("checked above");
                 self.mode = Mode::Normal;
-                let name = Some(text).filter(|t| !t.trim().is_empty());
-                if let Err(e) = self.rename(target, name) {
-                    self.flash = Some(e);
+                match purpose {
+                    PromptFor::Rename(target) => {
+                        let name = Some(text).filter(|t| !t.trim().is_empty());
+                        if let Err(e) = self.rename(target, name) {
+                            self.flash = Some(e);
+                        }
+                    }
+                    PromptFor::Search { forward } => {
+                        self.mode = Mode::Copy;
+                        if !text.is_empty() {
+                            self.search = Some((text, forward));
+                            self.search_next(false);
+                        }
+                    }
                 }
             }
             KeyCode::Backspace if ctrl => prompt.text.clear(),
@@ -1760,6 +1897,20 @@ impl App {
             }
         }
         Ok(serde_json::json!({ "name": name }))
+    }
+
+    /// `hivemux · 2 api · claude`: the workspace, then the focused pane.
+    fn window_title_text(&self) -> String {
+        let ws = match &self.ws.name {
+            Some(name) => format!("{} {name}", self.workspace),
+            None => self.workspace.to_string(),
+        };
+        let pane = self
+            .panes
+            .get(&self.ws.focus)
+            .and_then(|p| p.name.clone().or_else(|| p.program()))
+            .unwrap_or_default();
+        format!("hivemux · {ws} · {pane}")
     }
 
     /// Draws with the configured theme from now on. When it follows
@@ -2253,9 +2404,11 @@ impl App {
     /// at the end of the text.
     fn draw_prompt(&self, frame: &mut Frame, area: Rect) {
         let Some(prompt) = &self.prompt else { return };
-        let title = match prompt.target {
-            RenameTarget::Pane(id) => format!(" Name pane {id} "),
-            RenameTarget::Workspace(n) => format!(" Name workspace {n} "),
+        let title = match prompt.purpose {
+            PromptFor::Rename(RenameTarget::Pane(id)) => format!(" Name pane {id} "),
+            PromptFor::Rename(RenameTarget::Workspace(n)) => format!(" Name workspace {n} "),
+            PromptFor::Search { forward: true } => " Search down ".to_owned(),
+            PromptFor::Search { forward: false } => " Search up ".to_owned(),
         };
         let accent = theme::current().accent;
         let hint = Style::new().add_modifier(Modifier::DIM);
@@ -2265,7 +2418,13 @@ impl App {
                 Span::raw(prompt.text.clone()),
             ]),
             Line::default(),
-            Line::styled("Enter save · empty clears the name · Esc cancel", hint),
+            Line::styled(
+                match prompt.purpose {
+                    PromptFor::Rename(_) => "Enter save · empty clears the name · Esc cancel",
+                    PromptFor::Search { .. } => "Enter find · then n next, N previous · Esc cancel",
+                },
+                hint,
+            ),
         ];
         let width = (MAX_NAME as u16 + 8).max(56);
         let popup = centered(area, width, lines.len() as u16 + 2);
@@ -2481,7 +2640,7 @@ impl App {
             Mode::Copy => {
                 spans.push(Span::styled(" COPY ", badge));
                 spans.push(Span::styled(
-                    "  hjkl move · ^U ^D half page · ^B ^F page · g G top/bottom · v select · y copy · q quit",
+                    "  hjkl move · ^U ^D ^B ^F page · g G ends · / ? search · n N next · v select · y copy · q quit",
                     Style::new().fg(theme::current().accent),
                 ));
             }
@@ -2683,6 +2842,73 @@ fn git_state(cwd: &std::path::Path) -> Option<GitState> {
     })
 }
 
+/// Two clicks on the same cell within this time make a double click.
+const DOUBLE_CLICK: Duration = Duration::from_millis(400);
+
+/// The first and last column of the word around column `col` in `line`,
+/// `None` on a space.
+fn word_bounds(line: &str, col: usize) -> Option<(usize, usize)> {
+    let chars: Vec<char> = line.chars().collect();
+    let is_word = |c: &char| !c.is_whitespace() && !"\"'`()[]{}<>|,;".contains(*c);
+    if !chars.get(col).is_some_and(is_word) {
+        return None;
+    }
+    let start = chars[..col]
+        .iter()
+        .rposition(|c| !is_word(c))
+        .map_or(0, |i| i + 1);
+    let end = chars[col..]
+        .iter()
+        .position(|c| !is_word(c))
+        .map_or(chars.len(), |i| col + i)
+        - 1;
+    Some((start, end))
+}
+
+/// The next place `query` appears in `rows` after `from` (before it when
+/// not `forward`), wrapping around. Ignores case unless the query has
+/// capitals, like vim's smartcase.
+fn find_in_rows(
+    rows: &[String],
+    from: (usize, u16),
+    query: &str,
+    forward: bool,
+) -> Option<(usize, u16)> {
+    let fold = !query.chars().any(char::is_uppercase);
+    let norm = |s: &str| if fold { s.to_lowercase() } else { s.to_owned() };
+    let query = norm(query);
+    let len = rows.len();
+    if len == 0 || query.is_empty() {
+        return None;
+    }
+    // Columns of every match in a row, in characters.
+    let matches = |row: &str| -> Vec<usize> {
+        let row = norm(row);
+        row.match_indices(&query)
+            .map(|(byte, _)| row[..byte].chars().count())
+            .collect()
+    };
+    let (row0, col0) = (from.0.min(len - 1), usize::from(from.1));
+    for step in 0..=len {
+        let row = if forward {
+            (row0 + step) % len
+        } else {
+            (row0 + len - step % len) % len
+        };
+        let cols = matches(&rows[row]);
+        let hit = match (step, forward) {
+            (0, true) => cols.into_iter().find(|&c| c > col0),
+            (0, false) => cols.into_iter().rev().find(|&c| c < col0),
+            (_, true) => cols.into_iter().next(),
+            (_, false) => cols.into_iter().next_back(),
+        };
+        if let Some(col) = hit {
+            return Some((row, col as u16));
+        }
+    }
+    None
+}
+
 /// Names are cut to this many characters.
 const MAX_NAME: usize = 32;
 
@@ -2781,6 +3007,28 @@ mod tests {
         config.enabled = false;
         assert_eq!(split_sidebar(body, &config, false), (body, None));
         assert!(split_sidebar(body, &config, true).1.is_some());
+    }
+
+    #[test]
+    fn double_click_finds_the_word() {
+        let line = "cargo test --lib (src/app.rs) done";
+        assert_eq!(word_bounds(line, 2), Some((0, 4)));
+        assert_eq!(word_bounds(line, 12), Some((11, 15)));
+        assert_eq!(word_bounds(line, 20), Some((18, 27)));
+        assert_eq!(word_bounds(line, 5), None);
+    }
+
+    #[test]
+    fn search_finds_matches_both_ways_and_wraps() {
+        let rows: Vec<String> = ["error one", "ok", "Error two", "ok"]
+            .map(String::from)
+            .to_vec();
+        assert_eq!(find_in_rows(&rows, (0, 0), "error", true), Some((2, 0)));
+        assert_eq!(find_in_rows(&rows, (2, 0), "error", true), Some((0, 0)));
+        assert_eq!(find_in_rows(&rows, (3, 0), "error", false), Some((2, 0)));
+        assert_eq!(find_in_rows(&rows, (3, 0), "Error", false), Some((2, 0)));
+        assert_eq!(find_in_rows(&rows, (2, 0), "Error", true), Some((2, 0)));
+        assert_eq!(find_in_rows(&rows, (0, 0), "missing", true), None);
     }
 
     #[test]

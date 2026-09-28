@@ -60,7 +60,7 @@ a time, attaching from a second terminal detaches the first.
 | `Ctrl+B` `o` | Focus the next pane |
 | `Ctrl+B` `;` | Back to the pane focused before, across workspaces |
 | `Ctrl+B` `a` | Jump to the agent that has waited longest for you, then to finished ones |
-| `Ctrl+B` `[` | Copy mode: scroll back with vim keys (`Ctrl-U`/`Ctrl-D`, `Ctrl-B`/`Ctrl-F`, `g`/`G`), `v` select, `y` copy, `q` quit |
+| `Ctrl+B` `[` | Copy mode: scroll back with vim keys (`Ctrl-U`/`Ctrl-D`, `Ctrl-B`/`Ctrl-F`, `g`/`G`), `/` and `?` search down and up, `n`/`N` next, `v` select, `y` copy, `q` quit |
 | `Ctrl+B` `u` | Copy mode, one page up right away (`PgUp` works too) |
 | `Ctrl+B` `E` | The pane's whole history in `$EDITOR` |
 | `Ctrl+B` `c` … | Your commands from the config, e.g. `g` for lazygit |
@@ -71,6 +71,7 @@ a time, attaching from a second terminal detaches the first.
 | `Ctrl+B` `b` | Show or hide the sidebar |
 | `Ctrl+B` `e` | Into the sidebar: `j`/`k` move, `Enter` go, `r` name, `x` close, `Esc` back |
 | `Ctrl+B` `,` | Settings |
+| `Ctrl+B` `R` | Reload the config file |
 | `Ctrl+B` `?` | Show all keys |
 | `Ctrl+B` `Ctrl+B` | Send `Ctrl+B` to the shell |
 
@@ -133,9 +134,13 @@ exiting the last shell) deletes the file.
 
 ## Mouse
 
+The terminal window's title shows the workspace and the focused pane, e.g. `hivemux · 2 api · claude`.
+
+
 - Click a pane to focus it, click a workspace tab to switch to it.
+- Drag the border between two panes to resize them.
 - Drag a floating pane by its title bar, resize it by its bottom right corner.
-- Drag over text to select it, it is copied when you let go.
+- Drag over text to select it, it is copied when you let go. A double click copies a word.
 - The wheel scrolls back through the history, typing jumps back to the live screen.
 - Programs that use the mouse themselves, like nvim or htop, get the events. Hold Shift to
   select text in them anyway.

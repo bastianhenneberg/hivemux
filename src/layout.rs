@@ -3,7 +3,7 @@
 //! The tree only knows geometry. It does not own the panes, it refers to them
 //! by `PaneId`.
 
-use ratatui::layout::Rect;
+use ratatui::layout::{Position, Rect};
 use serde::{Deserialize, Serialize};
 
 pub type PaneId = usize;
@@ -165,6 +165,25 @@ impl Layout {
         }
     }
 
+    /// The divider under `pos`, as the path to its split (false = first
+    /// child, true = second). With a border on each pane, the two border
+    /// cells meeting at a divider both count. The innermost divider wins.
+    pub fn divider_at(&self, pos: Position, area: Rect) -> Option<Vec<bool>> {
+        let mut path = Vec::new();
+        self.root
+            .as_ref()?
+            .divider_at(pos, area, &mut path)
+            .then_some(path)
+    }
+
+    /// Moves the divider at `path` to `to`: its column for side by side
+    /// panes, its row for stacked ones, within the limits.
+    pub fn move_divider(&mut self, path: &[bool], to: Position, area: Rect) {
+        if let Some(root) = &mut self.root {
+            root.move_divider(path, to, area);
+        }
+    }
+
     /// Gives every pane in a row or column the same share of it.
     pub fn equalize(&mut self) {
         if let Some(root) = &mut self.root {
@@ -195,6 +214,67 @@ enum Resize {
 }
 
 impl Node {
+    fn divider_at(&self, pos: Position, area: Rect, path: &mut Vec<bool>) -> bool {
+        let Node::Split {
+            axis,
+            ratio,
+            first,
+            second,
+        } = self
+        else {
+            return false;
+        };
+        if !area.contains(pos) {
+            return false;
+        }
+        let (a, b) = split_rect(area, *axis, *ratio);
+        path.push(false);
+        if first.divider_at(pos, a, path) {
+            return true;
+        }
+        path.pop();
+        path.push(true);
+        if second.divider_at(pos, b, path) {
+            return true;
+        }
+        path.pop();
+        let (edge, at) = match axis {
+            Axis::Row => (b.x, pos.x),
+            Axis::Column => (b.y, pos.y),
+        };
+        at + 1 == edge || at == edge
+    }
+
+    fn move_divider(&mut self, path: &[bool], to: Position, area: Rect) {
+        let Node::Split {
+            axis,
+            ratio,
+            first,
+            second,
+        } = self
+        else {
+            return;
+        };
+        let (a, b) = split_rect(area, *axis, *ratio);
+        match path.split_first() {
+            Some((false, rest)) => first.move_divider(rest, to, a),
+            Some((true, rest)) => second.move_divider(rest, to, b),
+            None => {
+                let (start, total, to) = match axis {
+                    Axis::Row => (area.x, area.width, to.x),
+                    Axis::Column => (area.y, area.height, to.y),
+                };
+                if total < 2 * MIN_PANE_SIZE {
+                    return;
+                }
+                let first_size = to
+                    .saturating_sub(start)
+                    .clamp(MIN_PANE_SIZE, total - MIN_PANE_SIZE);
+                *ratio = f32::from(first_size) / f32::from(total);
+            }
+        }
+    }
+
     fn map_leaves(&mut self, f: &mut impl FnMut(PaneId) -> PaneId) {
         match self {
             Node::Leaf(id) => *id = f(*id),
@@ -464,6 +544,27 @@ mod tests {
         // Pane 3 moves the divider between 2 and 3.
         assert!(layout.resize(3, Direction::Up, 5, AREA));
         assert_eq!(layout.rects(AREA)[1].1.height, 15);
+    }
+
+    #[test]
+    fn dividers_are_found_and_moved() {
+        let mut layout = three_panes();
+        // The root divider sits between column 49 (pane 1's border) and 50.
+        assert_eq!(layout.divider_at(Position::new(49, 10), AREA), Some(vec![]));
+        assert_eq!(layout.divider_at(Position::new(50, 30), AREA), Some(vec![]));
+        // The divider between 2 and 3, inside the right half.
+        assert_eq!(
+            layout.divider_at(Position::new(70, 19), AREA),
+            Some(vec![true])
+        );
+        assert_eq!(layout.divider_at(Position::new(20, 10), AREA), None);
+
+        layout.move_divider(&[], Position::new(30, 5), AREA);
+        assert_eq!(layout.rects(AREA)[0].1.width, 30);
+        layout.move_divider(&[true], Position::new(60, 10), AREA);
+        assert_eq!(layout.rects(AREA)[1].1.height, 10);
+        layout.move_divider(&[], Position::new(99, 5), AREA);
+        assert_eq!(layout.rects(AREA)[0].1.width, 100 - MIN_PANE_SIZE);
     }
 
     #[test]
