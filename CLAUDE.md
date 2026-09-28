@@ -48,6 +48,10 @@ Projekt-Slug: `hivemux`
   warning). Themes aus Omarchys `colors.toml` (`~/.config/omarchy/themes`, `~/.local/share/omarchy/themes`,
   aktuell: `~/.local/state/omarchy/current/`), `src/theme.rs`. Test des Live-Folgens mit falschem
   `HOME` samt nachgebautem `.local/state/omarchy/current`.
+- Bilder (kitty graphics): `src/graphics.rs` (Scanner, Command, PaneGraphics), im Pane-Reader
+  vor vt100 abgefangen, `App::image_output` platziert nach jedem Frame. Test ohne Grafik-Terminal:
+  Client unter `script -qfc 'env HIVEMUX_GRAPHICS=1 hivemux' raw.txt` in tmux starten und die
+  APC-Sequenzen in `raw.txt` prüfen; Testprogramm mit echter PNG über Python (zlib/struct).
 - Tastenbelegung nach dem Prefix steht **nur** in `src/bindings.rs` (`BINDINGS`). Which-Key-Menü,
   Hilfe-Overlay und `hivemux keys` lesen daraus, neue Befehle dort eintragen, nicht in `app.rs`.
 - Einstellungen: `src/config.rs` (serde/TOML, `SETTINGS`-Tabelle fürs Settings-Menü). Neue

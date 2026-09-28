@@ -140,6 +140,16 @@ Codex sessions known from the hooks are resumed (`claude --resume <id>`). Proces
 contents cannot survive a restart. Ending the session on purpose (`Ctrl+B Q`, `kill-server`, or
 exiting the last shell) deletes the file.
 
+## Images
+
+Programs that show images with the kitty graphics protocol (icat, chafa, yazi, timg, mpv's
+kitty output, …) work in hivemux when your terminal draws them: kitty, Ghostty and WezTerm.
+hivemux answers their question whether images work, passes the image data on and places the
+images where the program put them. They scroll with the text, come back in the scrollback, and
+hide while a menu or a floating pane covers them. In other terminals, and inside tmux, nothing
+changes: programs hear no answer and fall back to text. `HIVEMUX_GRAPHICS=1` or `0` overrides
+the detection, the setting `images = false` turns it off.
+
 ## Mouse
 
 The terminal window's title shows the workspace and the focused pane, e.g. `hivemux · 2 api · claude`.

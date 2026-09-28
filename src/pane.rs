@@ -14,6 +14,7 @@ use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system}
 
 use crate::agent::{self, AgentState};
 use crate::app::AppEvent;
+use crate::graphics::{Advance, Chunk, PaneGraphics, Scanner};
 use crate::layout::PaneId;
 
 const SCROLLBACK_LINES: usize = 10_000;
@@ -25,6 +26,8 @@ pub struct Pane {
     child: Box<dyn Child + Send + Sync>,
     size: (u16, u16),
     last_output: Arc<Mutex<Instant>>,
+    /// Images the program shows with the kitty graphics protocol.
+    pub graphics: Arc<Mutex<PaneGraphics>>,
     /// The agent state the program reported with `hivemux status`.
     pub reported: Option<AgentState>,
     /// The agent's session id from its hooks, e.g. for `claude --resume`.
@@ -100,15 +103,50 @@ impl Pane {
         let reader_parser = Arc::clone(&parser);
         let last_output = Arc::new(Mutex::new(Instant::now()));
         let reader_last_output = Arc::clone(&last_output);
+        let graphics = Arc::new(Mutex::new(PaneGraphics::default()));
+        let reader_graphics = Arc::clone(&graphics);
         thread::Builder::new()
             .name("pty-reader".into())
             .spawn(move || {
                 let mut buf = [0u8; 8192];
+                let mut scanner = Scanner::default();
                 loop {
                     match reader.read(&mut buf) {
                         Ok(0) | Err(_) => break,
                         Ok(n) => {
-                            reader_parser.lock().unwrap().process(&buf[..n]);
+                            let mut parser = reader_parser.lock().unwrap();
+                            for chunk in scanner.feed(&buf[..n]) {
+                                match chunk {
+                                    Chunk::Text(text) => {
+                                        // Clearing the screen clears its images.
+                                        let all = find_bytes(&text, b"\x1b[3J");
+                                        if all || find_bytes(&text, b"\x1b[2J") {
+                                            let history = history_len(&mut parser);
+                                            reader_graphics
+                                                .lock()
+                                                .unwrap()
+                                                .clear_screen(history, all);
+                                        }
+                                        parser.process(&text);
+                                    }
+                                    Chunk::Graphics(body) => {
+                                        let history = history_len(&mut parser);
+                                        let (row, col) = parser.screen().cursor_position();
+                                        let cursor = (history + usize::from(row), col);
+                                        let advance =
+                                            reader_graphics.lock().unwrap().handle(&body, cursor);
+                                        // The cursor moves past a shown image, as it
+                                        // does in the terminals that draw it.
+                                        if let Some(Advance { cols, rows }) = advance {
+                                            let down =
+                                                "\n".repeat(usize::from(rows.saturating_sub(1)));
+                                            parser
+                                                .process(format!("{down}\x1b[{cols}C").as_bytes());
+                                        }
+                                    }
+                                }
+                            }
+                            drop(parser);
                             *reader_last_output.lock().unwrap() = Instant::now();
                             if events.send(AppEvent::PtyOutput).is_err() {
                                 return;
@@ -126,6 +164,7 @@ impl Pane {
             child,
             size: (rows, cols),
             last_output,
+            graphics,
             reported: None,
             session: None,
             name: None,
@@ -351,6 +390,10 @@ fn text_between(parser: &mut vt100::Parser, start: (usize, u16), end: (usize, u1
     }
     screen.set_scrollback(saved);
     out
+}
+
+fn find_bytes(haystack: &[u8], needle: &[u8]) -> bool {
+    haystack.windows(needle.len()).any(|w| w == needle)
 }
 
 /// The history length: vt100 clamps a too large offset to it.

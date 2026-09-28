@@ -5,6 +5,7 @@ mod cli;
 mod client;
 mod clipboard;
 mod config;
+mod graphics;
 mod keys;
 mod layout;
 mod menu;

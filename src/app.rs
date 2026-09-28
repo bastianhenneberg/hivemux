@@ -29,7 +29,7 @@ use crate::layout::{Axis, MIN_PANE_SIZE, PaneId};
 use crate::menu;
 use crate::pane::{Pane, Spawn};
 use crate::persist::{self, Saved, SavedPane};
-use crate::protocol::{self, ClientMsg, RenameTarget, Reply, Request, ServerMsg};
+use crate::protocol::{self, Caps, ClientMsg, RenameTarget, Reply, Request, ServerMsg};
 use crate::render::ScreenView;
 use crate::sidebar::{self, state_style};
 use crate::theme;
@@ -285,6 +285,12 @@ pub struct App {
     last_click: Option<(Instant, Position)>,
     /// The title last sent to the client's terminal window.
     window_title: String,
+    /// What the attached client's terminal can do.
+    caps: Caps,
+    /// Images shown on the client now, by (image, placement), with where.
+    shown_images: HashMap<(u32, u32), (u16, u16, u16, u16)>,
+    /// Send every image again: a client attached that has none of them.
+    resend_images: bool,
     quit: bool,
 }
 
@@ -335,6 +341,9 @@ impl App {
             search: None,
             last_click: None,
             window_title: String::new(),
+            caps: Caps::default(),
+            shown_images: HashMap::new(),
+            resend_images: false,
             quit: false,
         };
         app.apply_theme();
@@ -492,6 +501,7 @@ impl App {
             self.sync_sizes();
             self.update_agents();
             self.track_focus();
+            self.sync_graphics();
             self.refresh_git();
             self.follow_omarchy();
             self.save_state();
@@ -539,10 +549,16 @@ impl App {
     /// Draws the screen for the attached client. A client that cannot be
     /// written to anymore is dropped.
     fn render(&mut self) {
+        // Asked before taking the client out, which makes it look detached.
+        let graphics = self.graphics_enabled();
         let Some(mut client) = self.client.take() else {
             return;
         };
         if client.terminal.draw(|frame| self.draw(frame)).is_err() {
+            return;
+        }
+        let images = self.image_output(graphics);
+        if !images.is_empty() && client.send(&ServerMsg::Output(images)).is_err() {
             return;
         }
         // The terminal window's title names the workspace and the pane.
@@ -574,6 +590,12 @@ impl App {
                 Ok(())
             }
             AppEvent::ClientMsg(id, ClientMsg::Attach) => self.attach(id),
+            AppEvent::ClientMsg(id, ClientMsg::Caps(caps))
+                if self.client.as_ref().is_some_and(|c| c.id == id) =>
+            {
+                self.caps = caps;
+                Ok(())
+            }
             AppEvent::ClientMsg(id, ClientMsg::Request(request)) => {
                 let reply = self.request(request);
                 match self.conns.get_mut(&id) {
@@ -631,8 +653,11 @@ impl App {
         let stream = stream.try_clone()?;
         self.detach();
         let terminal = Client::terminal_for(&stream, self.screen)?;
-        // A new client gets the window title sent afresh.
+        // A new client gets the window title and every image sent afresh.
         self.window_title.clear();
+        self.caps = Caps::default();
+        self.shown_images.clear();
+        self.resend_images = true;
         self.client = Some(Client {
             id,
             stream,
@@ -2186,6 +2211,104 @@ impl App {
             }
         }
         Ok(serde_json::json!({ "name": name }))
+    }
+
+    /// Whether images are shown: an attached client whose terminal can, and
+    /// the setting on.
+    fn graphics_enabled(&self) -> bool {
+        self.client.is_some() && self.caps.graphics && self.config.images
+    }
+
+    /// Tells every pane whether to handle images and the cell size, and
+    /// writes the answers to programs' graphics queries.
+    fn sync_graphics(&mut self) {
+        let enabled = self.graphics_enabled();
+        let cell = (self.caps.cell_width, self.caps.cell_height);
+        for pane in self.panes.values_mut() {
+            let replies = {
+                let mut g = pane.graphics.lock().unwrap();
+                g.enabled = enabled;
+                g.cell = cell;
+                std::mem::take(&mut g.replies)
+            };
+            for reply in replies {
+                let _ = pane.write(&reply);
+            }
+        }
+    }
+
+    /// The bytes that bring the client's images up to date after a frame:
+    /// new image data, then placements moved, added and removed. Images
+    /// show only in panes nothing is drawn over.
+    fn image_output(&mut self, enabled: bool) -> Vec<u8> {
+        let mut out = Vec::new();
+        for pane in self.panes.values() {
+            let mut g = pane.graphics.lock().unwrap();
+            if enabled && self.resend_images {
+                g.resend();
+            }
+            for command in g.outbox.drain(..) {
+                if enabled {
+                    out.extend_from_slice(&command);
+                }
+            }
+        }
+        if enabled {
+            self.resend_images = false;
+        }
+
+        let mut wanted: HashMap<(u32, u32), (u16, u16, u16, u16)> = HashMap::new();
+        let quiet = matches!(self.mode, Mode::Normal | Mode::Repeat(..) | Mode::Copy);
+        if enabled && quiet {
+            let rects = self.ws.rects(self.body);
+            for (i, &(id, rect)) in rects.iter().enumerate() {
+                // Anything drawn later, i.e. a floating pane, hides it.
+                if rects[i + 1..].iter().any(|(_, r)| r.intersects(rect)) {
+                    continue;
+                }
+                let Some(pane) = self.panes.get(&id) else {
+                    continue;
+                };
+                let inner = pane_inner(rect);
+                let top = (pane.history_len() - pane.scroll_offset()) as i64;
+                let placements = pane.graphics.lock().unwrap().placements.clone();
+                for p in placements {
+                    let row = p.row as i64 - top;
+                    let fits = row >= 0
+                        && row + i64::from(p.rows) <= i64::from(inner.height)
+                        && p.col + p.cols <= inner.width;
+                    if fits {
+                        let at = (inner.x + p.col, inner.y + row as u16, p.cols, p.rows);
+                        wanted.insert((p.image, p.id), at);
+                    }
+                }
+            }
+        }
+
+        for (&(image, id), &at) in &wanted {
+            if self.shown_images.get(&(image, id)) == Some(&at) {
+                continue;
+            }
+            let (x, y, cols, rows) = at;
+            // Save the cursor, place the image without moving it, restore.
+            out.extend_from_slice(
+                format!(
+                    "\x1b7\x1b[{};{}H\x1b_Ga=p,i={image},p={id},c={cols},r={rows},C=1,q=2\x1b\\\x1b8",
+                    y + 1,
+                    x + 1
+                )
+                .as_bytes(),
+            );
+        }
+        for &(image, id) in self.shown_images.keys() {
+            if !wanted.contains_key(&(image, id)) {
+                out.extend_from_slice(
+                    format!("\x1b_Ga=d,d=i,i={image},p={id},q=2\x1b\\").as_bytes(),
+                );
+            }
+        }
+        self.shown_images = wanted;
+        out
     }
 
     /// `hivemux · 2 api · claude`: the workspace, then the focused pane.

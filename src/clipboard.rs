@@ -28,6 +28,12 @@ fn base64(bytes: &[u8]) -> String {
     out
 }
 
+/// Base64 for other modules' tests.
+#[cfg(test)]
+pub fn base64_for_tests(bytes: &[u8]) -> String {
+    base64(bytes)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

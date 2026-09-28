@@ -30,6 +30,18 @@ pub enum ClientMsg {
     Attach,
     /// A command from the CLI or an agent, answered with `ServerMsg::Reply`.
     Request(Request),
+    /// What the client's terminal can do, sent after attaching and after
+    /// every resize.
+    Caps(Caps),
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Caps {
+    /// Shows images sent with the kitty graphics protocol.
+    pub graphics: bool,
+    /// The size of a cell in pixels, for sizing images.
+    pub cell_width: u16,
+    pub cell_height: u16,
 }
 
 /// Commands for scripts and agents, sent by `hivemux status`, `list`,
@@ -103,6 +115,7 @@ impl ClientMsg {
             ClientMsg::KillServer => write_frame(w, 2, &[]),
             ClientMsg::Attach => write_frame(w, 3, &[]),
             ClientMsg::Request(request) => write_frame(w, 4, &serde_json::to_vec(request)?),
+            ClientMsg::Caps(caps) => write_frame(w, 6, &serde_json::to_vec(caps)?),
         }
     }
 
@@ -116,6 +129,7 @@ impl ClientMsg {
             2 => Ok(Some(ClientMsg::KillServer)),
             3 => Ok(Some(ClientMsg::Attach)),
             4 => Ok(Some(ClientMsg::Request(serde_json::from_slice(&payload)?))),
+            6 => Ok(Some(ClientMsg::Caps(serde_json::from_slice(&payload)?))),
             _ => Err(invalid(format!("unknown client message {tag}"))),
         }
     }
@@ -273,6 +287,11 @@ mod tests {
             ClientMsg::Event(Event::Paste("hallo\nwelt".into())),
             ClientMsg::KillServer,
             ClientMsg::Attach,
+            ClientMsg::Caps(Caps {
+                graphics: true,
+                cell_width: 9,
+                cell_height: 19,
+            }),
             ClientMsg::Request(Request::Status {
                 pane: 3,
                 state: Some(AgentState::Blocked),

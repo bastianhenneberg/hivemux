@@ -109,6 +109,9 @@ pub struct Config {
     pub notifications: Notifications,
     /// The user's own commands, in the `Ctrl+B c` menu.
     pub commands: Vec<UserCommand>,
+    /// Images from programs, with the kitty graphics protocol, where the
+    /// terminal shows them.
+    pub images: bool,
 }
 
 /// A command of the user's, e.g. lazygit, started from the `Ctrl+B c` menu.
@@ -169,6 +172,7 @@ impl Default for Config {
                 command: "lazygit".into(),
                 float: true,
             }],
+            images: true,
         }
     }
 }
@@ -304,6 +308,11 @@ pub const SETTINGS: &[Setting] = &[
                 forward,
             )
         },
+    },
+    Setting {
+        name: "Images",
+        value: |c| if c.images { "on" } else { "off" }.to_owned(),
+        step: |c, _| c.images = !c.images,
     },
     Setting {
         name: "Which-key menu",

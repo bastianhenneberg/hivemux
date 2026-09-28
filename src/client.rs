@@ -23,7 +23,7 @@ use crossterm::terminal::{
     enable_raw_mode,
 };
 
-use crate::protocol::{ClientMsg, Request, ServerMsg, session_socket, socket_path};
+use crate::protocol::{Caps, ClientMsg, Request, ServerMsg, session_socket, socket_path};
 
 /// How a client session ended.
 enum Outcome {
@@ -65,7 +65,12 @@ pub fn run(start: bool) -> Result<()> {
     thread::Builder::new().name("input".into()).spawn(move || {
         while let Ok(event) = event::read() {
             if let Some(stream) = input.lock().unwrap().as_mut() {
+                let resized = matches!(event, Event::Resize(..));
                 let _ = ClientMsg::Event(event).write_to(stream);
+                // A new size can mean a new cell size, e.g. after zooming.
+                if resized {
+                    let _ = ClientMsg::Caps(caps()).write_to(stream);
+                }
             }
         }
     })?;
@@ -101,6 +106,35 @@ pub fn run(start: bool) -> Result<()> {
         Outcome::Switch(_) => {}
     }
     Ok(())
+}
+
+/// What this terminal can do. Images only where the kitty graphics protocol
+/// is known to work: kitty, Ghostty and WezTerm, and never inside tmux,
+/// which does not pass it on. `HIVEMUX_GRAPHICS=1` or `0` decides instead.
+fn caps() -> Caps {
+    let env = |name: &str| std::env::var(name).unwrap_or_default();
+    let graphics = match env("HIVEMUX_GRAPHICS").as_str() {
+        "1" | "on" | "true" => true,
+        "0" | "off" | "false" => false,
+        _ => {
+            std::env::var_os("TMUX").is_none()
+                && (env("TERM").contains("kitty")
+                    || env("TERM").contains("ghostty")
+                    || ["WezTerm", "ghostty"].contains(&env("TERM_PROGRAM").as_str()))
+        }
+    };
+    // Terminals that do not say their pixel size get a common one.
+    let (cell_width, cell_height) = match terminal::window_size() {
+        Ok(size) if size.columns > 0 && size.rows > 0 && size.width > 0 && size.height > 0 => {
+            (size.width / size.columns, size.height / size.rows)
+        }
+        _ => (10, 20),
+    };
+    Caps {
+        graphics,
+        cell_width,
+        cell_height,
+    }
 }
 
 /// Tells a running server to shut down.
@@ -144,6 +178,7 @@ fn session(mut stream: UnixStream, writer: &Writer) -> Result<Outcome> {
     let (cols, rows) = terminal::size()?;
     ClientMsg::Attach.write_to(&mut to_server)?;
     ClientMsg::Event(Event::Resize(cols, rows)).write_to(&mut to_server)?;
+    ClientMsg::Caps(caps()).write_to(&mut to_server)?;
     *writer.lock().unwrap() = Some(to_server);
 
     let mut out = stdout().lock();
