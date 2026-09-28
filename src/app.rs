@@ -1358,13 +1358,17 @@ impl App {
         if bars.path == side
             && let Some(cwd) = self.focused_cwd()
         {
-            let room = usize::from(area.width).saturating_sub(left.width() + 3);
+            let room = usize::from(area.width).saturating_sub(left.width() + 5);
             let path = shorten(&tilde(&cwd), room);
             if !path.is_empty() {
-                frame.render_widget(
-                    Line::styled(format!(" {path} "), hint).right_aligned(),
-                    area,
-                );
+                // Plain text with a coloured marker: dimmed text is close to
+                // invisible in some colour schemes.
+                let line = Line::from(vec![
+                    Span::styled("▸ ", Style::new().fg(HONEY).add_modifier(Modifier::BOLD)),
+                    Span::raw(path),
+                    Span::raw(" "),
+                ]);
+                frame.render_widget(line.right_aligned(), area);
             }
         }
         frame.render_widget(left, area);
