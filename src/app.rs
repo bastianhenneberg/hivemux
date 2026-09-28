@@ -2670,19 +2670,29 @@ impl App {
             let focused = id == self.ws.focus;
             let floating = self.ws.is_floating(id);
             let state = self.shown_state(id);
+            let t = theme::current();
+            // Floating panes get their own colour, so they stand apart from
+            // the tiling even without focus.
             let border = match (focused, state) {
-                (_, Some(AgentState::Blocked)) => Style::new().fg(theme::current().danger),
-                (true, _) => Style::new().fg(theme::current().accent),
-                (false, _) => Style::new().fg(theme::current().subtle),
+                (_, Some(AgentState::Blocked)) => Style::new().fg(t.danger),
+                (true, _) => Style::new().fg(t.accent),
+                (false, _) if floating => Style::new().fg(t.cyan),
+                (false, _) => Style::new().fg(t.subtle),
             };
-
-            let mut title = vec![Span::raw(format!(
-                " {id} {} ",
-                pane.name
-                    .clone()
-                    .or_else(|| pane.program())
-                    .unwrap_or_else(|| self.title.clone())
-            ))];
+            let label = pane
+                .name
+                .clone()
+                .or_else(|| pane.program())
+                .unwrap_or_else(|| self.title.clone());
+            let label_style = if focused {
+                Style::new().add_modifier(Modifier::BOLD)
+            } else {
+                Style::new()
+            };
+            let mut title = vec![
+                Span::styled(format!(" {id} "), Style::new().fg(t.muted)),
+                Span::styled(format!("{label} "), label_style),
+            ];
             if let Some(state) = state {
                 title.push(Span::styled(
                     format!("{} {} ", state.symbol(), state.name()),
@@ -2690,7 +2700,7 @@ impl App {
                 ));
             }
             if floating {
-                title.push(Span::raw("⧉ "));
+                title.push(Span::styled("⧉ ", Style::new().fg(t.cyan)));
             }
             if self.ws.zoomed == Some(id) {
                 title.push(Span::styled(
@@ -2702,7 +2712,10 @@ impl App {
             }
             let offset = pane.scroll_offset();
             if offset > 0 {
-                title.push(Span::raw(format!("⇡{offset}/{} ", pane.history_len())));
+                title.push(Span::styled(
+                    format!("⇡{offset}/{} ", pane.history_len()),
+                    Style::new().fg(t.magenta),
+                ));
             }
             let block = Block::bordered()
                 .border_type(BorderType::Rounded)
@@ -2928,7 +2941,10 @@ impl App {
     /// on the right, whichever of them the settings put on `side`.
     fn draw_bar(&self, frame: &mut Frame, area: Rect, side: Placement) {
         let bars = &self.config.bars;
-        let hint = Style::new().add_modifier(Modifier::DIM);
+        let t = theme::current();
+        let hint = Style::new().fg(t.muted);
+        // The bar gets a surface of its own, set apart from the panes.
+        frame.render_widget(Block::new().style(Style::new().bg(t.surface)), area);
         let control = bars.control() == side;
 
         let mut spans = Vec::new();
@@ -2954,19 +2970,13 @@ impl App {
                 // Plain text with a coloured marker: dimmed text is close to
                 // invisible in some colour schemes.
                 let line = Line::from(vec![
-                    Span::styled(
-                        "▸ ",
-                        Style::new()
-                            .fg(theme::current().accent)
-                            .add_modifier(Modifier::BOLD),
-                    ),
+                    Span::styled("▸ ", Style::new().fg(t.cyan).add_modifier(Modifier::BOLD)),
                     Span::raw(path),
                     Span::raw(" "),
                 ]);
                 // Alone in its line the path starts on the left, where the
                 // eye is. Next to the control bar or tabs it goes right.
                 if left.width() == 0 {
-                    frame.render_widget(Line::from(" ").patch_style(Style::new()), area);
                     let area = Rect {
                         x: area.x + 1,
                         width: area.width.saturating_sub(1),
@@ -2981,8 +2991,10 @@ impl App {
         frame.render_widget(left, area);
     }
 
+    /// Workspace tabs, each in its workspace's colour: filled when it is
+    /// the active one, red when an agent there waits.
     fn tab_spans(&self) -> Vec<Span<'static>> {
-        let hint = Style::new().add_modifier(Modifier::DIM);
+        let t = theme::current();
         self.workspaces()
             .into_iter()
             .map(|n| {
@@ -3007,106 +3019,74 @@ impl App {
                     Span::styled(
                         tab_label(n, ws),
                         Style::new()
-                            .fg(theme::current().accent)
-                            .bg(theme::current().subtle)
+                            .fg(t.on_accent)
+                            .bg(t.workspace(n))
                             .add_modifier(Modifier::BOLD),
                     )
                 } else {
-                    Span::styled(tab_label(n, ws), hint)
+                    Span::styled(tab_label(n, ws), Style::new().fg(t.workspace(n)))
                 }
             })
             .collect()
     }
 
-    /// The mode badge and key hints of the control bar.
+    /// The mode badge and key hints of the control bar. Every mode has its
+    /// own colour, so a glance at the bar tells which one is on.
     fn mode_spans(&self) -> Vec<Span<'static>> {
-        let badge = badge_style();
-        let hint = Style::new().add_modifier(Modifier::DIM);
+        let t = theme::current();
+        let hint = Style::new().fg(t.muted);
         let mut spans = Vec::new();
+        let searching = self
+            .prompt
+            .as_ref()
+            .is_some_and(|p| matches!(p.purpose, PromptFor::Search { .. }));
+        let (label, color, keys) = match self.mode {
+            Mode::Prefix(_) => ("PREFIX", t.accent, "? all keys · Esc cancel"),
+            Mode::Menu(_) => (
+                "QUIT",
+                t.magenta,
+                "↑↓ select · Enter or letter choose · Esc cancel",
+            ),
+            Mode::Settings(_) => (
+                "SETTINGS",
+                t.cyan,
+                "↑↓ select · ←→ Enter change · Esc close",
+            ),
+            Mode::Sessions(_) => (
+                "SESSIONS",
+                t.magenta,
+                "↑↓ choose · Enter switch · n new · Esc cancel",
+            ),
+            Mode::Picker => ("GO TO", t.cyan, "type to filter · Enter go · Esc cancel"),
+            Mode::Sidebar(_) => (
+                "SIDEBAR",
+                t.blue,
+                "j k move · Enter go/diff · o edit file · r name · x close · Esc back",
+            ),
+            Mode::Prompt if searching => ("SEARCH", t.orange, "Enter find · Esc cancel"),
+            Mode::Prompt => ("NAME", t.orange, "Enter save · Esc cancel"),
+            Mode::Copy => (
+                "COPY",
+                t.magenta,
+                "hjkl move · ^U ^D ^B ^F page · g G ends · / ? search · n N next · v select · y copy · q quit",
+            ),
+            Mode::Help(_) => ("HELP", t.blue, "j k scroll · any other key closes"),
+            Mode::Confirm(_) => ("CONFIRM", t.danger, "y yes · any other key cancels"),
+            Mode::Repeat(..) => ("REPEAT", t.orange, "arrows again, without the prefix"),
+            Mode::Normal => ("", t.accent, ""),
+        };
+        if !label.is_empty() {
+            spans.push(Span::styled(
+                format!(" {label} "),
+                Style::new()
+                    .fg(t.on_accent)
+                    .bg(color)
+                    .add_modifier(Modifier::BOLD),
+            ));
+            spans.push(Span::styled(format!("  {keys}"), Style::new().fg(color)));
+            return spans;
+        }
         match self.mode {
-            Mode::Prefix(_) => {
-                spans.push(Span::styled(" PREFIX ", badge));
-                spans.push(Span::styled(
-                    "  ? all keys · Esc cancel",
-                    Style::new().fg(theme::current().accent),
-                ));
-            }
-            Mode::Menu(_) => {
-                spans.push(Span::styled(" QUIT ", badge));
-                spans.push(Span::styled(
-                    "  ↑↓ select · Enter or letter choose · Esc cancel",
-                    Style::new().fg(theme::current().accent),
-                ));
-            }
-            Mode::Settings(_) => {
-                spans.push(Span::styled(" SETTINGS ", badge));
-                spans.push(Span::styled(
-                    "  ↑↓ select · ←→ Enter change · Esc close",
-                    Style::new().fg(theme::current().accent),
-                ));
-            }
-            Mode::Sessions(_) => {
-                spans.push(Span::styled(" SESSIONS ", badge));
-                spans.push(Span::styled(
-                    "  ↑↓ choose · Enter switch · n new · Esc cancel",
-                    Style::new().fg(theme::current().accent),
-                ));
-            }
-            Mode::Picker => {
-                spans.push(Span::styled(" GO TO ", badge));
-                spans.push(Span::styled(
-                    "  type to filter · Enter go · Esc cancel",
-                    Style::new().fg(theme::current().accent),
-                ));
-            }
-            Mode::Sidebar(_) => {
-                spans.push(Span::styled(" SIDEBAR ", badge));
-                spans.push(Span::styled(
-                    "  j k move · Enter go/diff · o edit file · r name · x close · Esc back",
-                    Style::new().fg(theme::current().accent),
-                ));
-            }
-            Mode::Prompt => {
-                spans.push(Span::styled(" NAME ", badge));
-                spans.push(Span::styled(
-                    "  Enter save · Esc cancel",
-                    Style::new().fg(theme::current().accent),
-                ));
-            }
-            Mode::Copy => {
-                spans.push(Span::styled(" COPY ", badge));
-                spans.push(Span::styled(
-                    "  hjkl move · ^U ^D ^B ^F page · g G ends · / ? search · n N next · v select · y copy · q quit",
-                    Style::new().fg(theme::current().accent),
-                ));
-            }
-            Mode::Help(_) => {
-                spans.push(Span::styled(" HELP ", badge));
-                spans.push(Span::styled(
-                    "  j k scroll · any other key closes",
-                    Style::new().fg(theme::current().accent),
-                ));
-            }
-            Mode::Confirm(_) => {
-                spans.push(Span::styled(
-                    " CONFIRM ",
-                    Style::new()
-                        .fg(theme::current().on_accent)
-                        .bg(theme::current().danger)
-                        .add_modifier(Modifier::BOLD),
-                ));
-                spans.push(Span::styled(
-                    "  y yes · any other key cancels",
-                    Style::new().fg(theme::current().danger),
-                ));
-            }
-            Mode::Repeat(..) => {
-                spans.push(Span::styled(" REPEAT ", badge));
-                spans.push(Span::styled(
-                    "  ←↑↓→ focus  ^←↑↓→ resize",
-                    Style::new().fg(theme::current().accent),
-                ));
-            }
             Mode::Normal if self.flash.is_some() => {
                 let text = self.flash.as_deref().unwrap_or_default();
                 // Messages about waiting agents are warnings, the rest are
@@ -3121,7 +3101,7 @@ impl App {
                 } else {
                     spans.push(Span::styled(
                         format!("✓ {text}"),
-                        Style::new().fg(theme::current().accent),
+                        Style::new().fg(theme::current().success),
                     ));
                 }
             }
@@ -3158,6 +3138,8 @@ impl App {
                     hint,
                 ));
             }
+            // Every other mode returned its badge above.
+            _ => {}
         }
         spans
     }

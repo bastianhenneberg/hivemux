@@ -92,11 +92,13 @@ pub fn state_style(state: AgentState) -> Style {
 pub fn lines(data: &Data, width: u16) -> Vec<(Line<'static>, Option<Target>)> {
     let width = usize::from(width);
     let t = theme::current();
-    let heading = Style::new().add_modifier(Modifier::BOLD);
-    let dim = Style::new().add_modifier(Modifier::DIM);
+    // Each section has a colour of its own, workspaces the colour they have
+    // everywhere.
+    let heading = |color| Style::new().fg(color).add_modifier(Modifier::BOLD);
+    let dim = Style::new().fg(t.muted);
     let mut out = Vec::new();
 
-    out.push((Line::styled("Workspaces", heading), None));
+    out.push((Line::styled("Workspaces", heading(t.blue)), None));
     for ws in &data.workspaces {
         let marker = if ws.active { "▸ " } else { "  " };
         let mut right = String::new();
@@ -108,9 +110,11 @@ pub fn lines(data: &Data, width: u16) -> Vec<(Line<'static>, Option<Target>)> {
         let left = fit(&left, room);
         let pad = width.saturating_sub(left.chars().count() + right.chars().count());
         let style = if ws.active {
-            Style::new().fg(t.accent).add_modifier(Modifier::BOLD)
-        } else {
             Style::new()
+                .fg(t.workspace(ws.number))
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::new().fg(t.workspace(ws.number))
         };
         let mut spans = vec![Span::styled(left, style), Span::raw(" ".repeat(pad))];
         if let Some(state) = ws.state {
@@ -120,7 +124,7 @@ pub fn lines(data: &Data, width: u16) -> Vec<(Line<'static>, Option<Target>)> {
     }
 
     out.push((Line::default(), None));
-    out.push((Line::styled("Agents", heading), None));
+    out.push((Line::styled("Agents", heading(t.magenta)), None));
     if data.agents.is_empty() {
         out.push((Line::styled("  none running", dim), None));
     }
@@ -139,7 +143,7 @@ pub fn lines(data: &Data, width: u16) -> Vec<(Line<'static>, Option<Target>)> {
         };
         let line = Line::from(vec![
             Span::styled(head, name_style),
-            Span::styled(place, dim),
+            Span::styled(place, Style::new().fg(t.workspace(agent.workspace))),
             Span::raw(" ".repeat(pad)),
             Span::styled(age, dim),
         ]);
@@ -150,7 +154,7 @@ pub fn lines(data: &Data, width: u16) -> Vec<(Line<'static>, Option<Target>)> {
         out.push((Line::default(), None));
         out.push((
             Line::from(vec![
-                Span::styled("Git ", heading),
+                Span::styled("Git ", heading(t.orange)),
                 Span::styled(
                     fit(&format!(" {branch}"), width.saturating_sub(4)),
                     Style::new().fg(t.accent),

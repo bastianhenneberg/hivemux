@@ -285,6 +285,17 @@ pub fn draw_settings(
         }
         lines.push(line);
     }
+    // The colours of the chosen theme, to see what it looks like.
+    let t = theme::current();
+    let mut swatch = vec![Span::raw(" ")];
+    for color in [t.accent, t.danger, t.success, t.warning]
+        .into_iter()
+        .chain(t.palette())
+    {
+        swatch.push(Span::styled("■ ", Style::new().fg(color)));
+    }
+    lines.push(Line::default());
+    lines.push(Line::from(swatch));
     lines.push(Line::default());
     lines.push(Line::from(vec![
         Span::styled("↑↓", key_style()),

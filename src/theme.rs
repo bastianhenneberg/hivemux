@@ -27,6 +27,15 @@ pub struct Theme {
     pub success: Color,
     /// Working agents.
     pub warning: Color,
+    /// More hues, to tell workspaces, modes and menu groups apart.
+    pub blue: Color,
+    pub cyan: Color,
+    pub magenta: Color,
+    pub orange: Color,
+    /// Quieter text: hints, directories, times.
+    pub muted: Color,
+    /// The background of the bars, a shade off the terminal's.
+    pub surface: Color,
 }
 
 pub const HONEY: Theme = Theme {
@@ -36,7 +45,35 @@ pub const HONEY: Theme = Theme {
     danger: Color::LightRed,
     success: Color::LightGreen,
     warning: Color::Rgb(250, 190, 0),
+    blue: Color::Rgb(97, 175, 239),
+    cyan: Color::Rgb(86, 182, 194),
+    magenta: Color::Rgb(198, 120, 221),
+    orange: Color::Rgb(232, 145, 74),
+    muted: Color::Gray,
+    // The terminal's own background: honey keeps its look.
+    surface: Color::Reset,
 };
+
+impl Theme {
+    /// Colours for things that should look different from each other, like
+    /// workspaces.
+    pub fn palette(&self) -> [Color; 6] {
+        [
+            self.blue,
+            self.magenta,
+            self.cyan,
+            self.success,
+            self.orange,
+            self.warning,
+        ]
+    }
+
+    /// The colour of workspace `n`, the same wherever it shows.
+    pub fn workspace(&self, n: u8) -> Color {
+        let palette = self.palette();
+        palette[usize::from(n.saturating_sub(1)) % palette.len()]
+    }
+}
 
 thread_local! {
     static CURRENT: Cell<Theme> = const { Cell::new(HONEY) };
@@ -108,6 +145,22 @@ pub fn parse(text: &str) -> Option<Theme> {
         danger: color("red").unwrap_or(HONEY.danger),
         success: color("green").unwrap_or(HONEY.success),
         warning: color("yellow").unwrap_or(accent),
+        blue: color("blue")
+            .or_else(|| color("bright_blue"))
+            .unwrap_or(HONEY.blue),
+        cyan: color("cyan")
+            .or_else(|| color("bright_cyan"))
+            .unwrap_or(HONEY.cyan),
+        magenta: color("magenta")
+            .or_else(|| color("bright_magenta"))
+            .unwrap_or(HONEY.magenta),
+        orange: color("orange").unwrap_or(HONEY.orange),
+        muted: color("dark_foreground")
+            .or_else(|| color("muted"))
+            .unwrap_or(HONEY.muted),
+        surface: color("lighter_background")
+            .or_else(|| color("dark_background"))
+            .unwrap_or(HONEY.surface),
     })
 }
 
@@ -171,6 +224,17 @@ green = "#a6e3a1"
         assert_eq!(theme.subtle, Color::Rgb(0x45, 0x47, 0x5a));
         assert_eq!(theme.danger, Color::Rgb(0xf3, 0x8b, 0xa8));
         assert_eq!(theme.warning, Color::Rgb(0xf9, 0xe2, 0xaf));
+    }
+
+    #[test]
+    fn reads_the_extra_hues_and_gives_workspaces_colors() {
+        let theme = parse("accent = \"#010203\"\nblue = \"#0000ff\"\nmagenta = \"#ff00ff\"\nlighter_background = \"#222222\"").unwrap();
+        assert_eq!(theme.blue, Color::Rgb(0, 0, 255));
+        assert_eq!(theme.surface, Color::Rgb(0x22, 0x22, 0x22));
+        assert_eq!(theme.workspace(1), theme.blue);
+        assert_eq!(theme.workspace(2), theme.magenta);
+        assert_eq!(theme.workspace(7), theme.blue);
+        assert_eq!(theme.cyan, HONEY.cyan);
     }
 
     #[test]

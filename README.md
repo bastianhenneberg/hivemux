@@ -192,6 +192,9 @@ path = "bottom"     # directory of the focused pane: "top", "bottom" or "off"
 Themes: `hivemux` is honey on your terminal's colours. `omarchy` follows the current Omarchy theme
 and changes with it. Any installed Omarchy theme (`catppuccin`, `gruvbox`, `tokyo-night`, …) can be
 picked by name, its `colors.toml` provides the colours. In the settings, ←/→ step through them.
+Themes colour more than the accent: every workspace has its own colour in tabs and sidebar,
+every mode its own badge, floating panes their own border, and the bars a surface of their
+own. The settings show the chosen theme's colours.
 
 Your own commands go in the `Ctrl+B c` menu, run with `sh -c` in the focused pane's directory,
 in a floating pane unless `float = false`:
