@@ -137,7 +137,12 @@ hivemux rename "tests"                          # name the pane this runs in
 hivemux wait --pane 3 --until ready            # wait until an agent is idle or done
 hivemux read --pane 3 --lines 20               # what it wrote last
 hivemux rename --workspace 2 api               # name a workspace
+hivemux notify "tests are green"              # a notification, titled after this pane
+hivemux notify --title build "done in 42 s"    # with a title of its own
 ```
+
+`notify` goes out the way the settings say (a desktop notification through `notify-send`,
+OSC 9 to the terminal, or none) and shows up in the control bar as well.
 
 ## Updates
 

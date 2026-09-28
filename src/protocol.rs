@@ -75,6 +75,15 @@ pub enum Request {
     },
     /// Rename the session.
     RenameSession { name: String },
+    /// Show `text` as a notification, the way the settings say, titled
+    /// `title` or else after `pane`.
+    Notify {
+        text: String,
+        #[serde(default)]
+        title: Option<String>,
+        #[serde(default)]
+        pane: Option<PaneId>,
+    },
     /// The session's layout as `persist` saves it, for save files.
     Snapshot,
     /// Replace the server with the binary at `exe`, keeping the session,
@@ -317,6 +326,11 @@ mod tests {
                 pane: 3,
                 state: Some(AgentState::Blocked),
                 session: Some("abc".into()),
+            }),
+            ClientMsg::Request(Request::Notify {
+                text: "build finished".into(),
+                title: None,
+                pane: Some(2),
             }),
             ClientMsg::Request(Request::New {
                 command: vec!["claude".into(), "--resume".into()],

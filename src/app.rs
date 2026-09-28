@@ -842,6 +842,16 @@ impl App {
                 }
                 Ok(serde_json::json!({ "pane": pane }))
             }
+            Request::Notify { text, title, pane } => {
+                let title = match (title, pane) {
+                    (Some(title), _) => title,
+                    (None, Some(id)) => self.pane_who(id).unwrap_or_else(|| "hivemux".into()),
+                    (None, None) => "hivemux".into(),
+                };
+                self.flash = Some(format!("{title}: {text}"));
+                self.send_notification(&title, &text);
+                Ok(serde_json::json!({ "notified": true }))
+            }
             Request::List => Ok(self.list()),
             Request::Rename { target, name } => self.rename(target, name),
             Request::Read { pane, lines } => {
@@ -1030,28 +1040,42 @@ impl App {
     /// Tells the user outside hivemux that the agent in pane `id` `what`,
     /// e.g. "needs you", the way the settings say.
     fn notify(&mut self, id: PaneId, what: &str) {
-        let Some(pane) = self.panes.get(&id) else {
+        let Some(who) = self.pane_who(id) else {
             return;
         };
-        let who = pane
-            .name
-            .clone()
-            .or_else(|| pane.program())
-            .unwrap_or_else(|| "agent".into());
-        let place = match (self.workspace_of(id), pane.cwd()) {
+        let cwd = self.panes.get(&id).and_then(|pane| pane.cwd());
+        let place = match (self.workspace_of(id), cwd) {
             (Some(n), Some(cwd)) => format!("workspace {n} · {}", tilde(&cwd)),
             (Some(n), None) => format!("workspace {n}"),
             _ => String::new(),
         };
-        let title = format!("{who} {what}");
+        self.send_notification(&format!("{who} {what}"), &place);
+    }
+
+    /// The name pane `id` goes by in notifications: its name, else its
+    /// program.
+    fn pane_who(&self, id: PaneId) -> Option<String> {
+        let pane = self.panes.get(&id)?;
+        Some(
+            pane.name
+                .clone()
+                .or_else(|| pane.program())
+                .unwrap_or_else(|| "agent".into()),
+        )
+    }
+
+    /// Sends a notification with `title` and `body` the way the settings
+    /// say: through `notify-send`, as OSC 9 to the terminal, or not at all.
+    fn send_notification(&mut self, title: &str, body: &str) {
         match self.config.notifications {
             Notifications::Off => {}
             Notifications::Terminal => {
                 if let Some(client) = &mut self.client {
-                    let text: String = format!("hivemux: {title}")
-                        .chars()
-                        .filter(|c| !c.is_control())
-                        .collect();
+                    let text = match body {
+                        "" => format!("hivemux: {title}"),
+                        body => format!("hivemux: {title} · {body}"),
+                    };
+                    let text: String = text.chars().filter(|c| !c.is_control()).collect();
                     let _ = client.send(&ServerMsg::Output(
                         format!("\x1b]9;{text}\x07").into_bytes(),
                     ));
@@ -1059,7 +1083,7 @@ impl App {
             }
             Notifications::System => {
                 let spawned = std::process::Command::new("notify-send")
-                    .args(["--app-name=hivemux", &title, &place])
+                    .args(["--app-name=hivemux", title, body])
                     .stdin(std::process::Stdio::null())
                     .stdout(std::process::Stdio::null())
                     .stderr(std::process::Stdio::null())

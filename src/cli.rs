@@ -1,5 +1,5 @@
-//! Commands for scripts and agents: `hivemux status`, `list`, `send`, `new`
-//! and `hooks`. They talk to the running server over its socket.
+//! Commands for scripts and agents: `hivemux status`, `list`, `send`, `new`,
+//! `notify` and `hooks`. They talk to the running server over its socket.
 
 use std::io::Read;
 
@@ -163,6 +163,25 @@ pub fn send(args: &[String]) -> Result<()> {
         pane,
         text: rest.join(" "),
         enter,
+    })?;
+    Ok(())
+}
+
+/// `hivemux notify [--title T] [--pane N] <text>...`
+///
+/// Shows `text` as a notification, the way the settings say, and in the
+/// control bar. Without a title it is titled after the pane it runs in.
+pub fn notify(args: &[String]) -> Result<()> {
+    let mut rest = args.to_vec();
+    let title = take_value(&mut rest, "--title")?;
+    let pane = take_pane(&mut rest)?;
+    if rest.is_empty() {
+        bail!("usage: hivemux notify [--title T] [--pane N] <text>...");
+    }
+    client::request(Request::Notify {
+        text: rest.join(" "),
+        title,
+        pane,
     })?;
     Ok(())
 }

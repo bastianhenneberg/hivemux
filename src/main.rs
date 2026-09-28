@@ -47,6 +47,8 @@ For scripts and agents:
   list [--json]                         list the panes with program and agent state
   status <working|blocked|idle|clear>   report this pane's agent state (for hooks)
   send [--pane N] [--no-enter] <text>   type text into a pane
+  notify [--title T] [--pane N] <text>  show a notification (desktop, terminal or
+                                        off, as set in the settings)
   new [--float] [--workspace N] [-- command args...]
                                         start a command in a new pane
   rename [--pane N | --workspace N] [--clear | <name>]
@@ -101,6 +103,7 @@ fn main() -> Result<()> {
         ["status", ..] => cli::status(&args[1..]),
         ["list", ..] => cli::list(&args[1..]),
         ["send", ..] => cli::send(&args[1..]),
+        ["notify", ..] => cli::notify(&args[1..]),
         ["new", ..] => cli::new(&args[1..]),
         ["rename", ..] => cli::rename(&args[1..]),
         ["read", ..] => cli::read(&args[1..]),
