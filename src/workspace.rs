@@ -28,6 +28,9 @@ pub struct Workspace {
     /// A name the user gave it, shown instead of the project directory.
     #[serde(default)]
     pub name: Option<String>,
+    /// The pane shown alone over the whole workspace, if any.
+    #[serde(default)]
+    pub zoomed: Option<PaneId>,
 }
 
 impl Workspace {
@@ -39,6 +42,7 @@ impl Workspace {
             focus: pane,
             last_tiled: Some(pane),
             name: None,
+            zoomed: None,
         }
     }
 
@@ -50,6 +54,7 @@ impl Workspace {
             focus: 0,
             last_tiled: None,
             name: None,
+            zoomed: None,
         }
     }
 
@@ -76,6 +81,9 @@ impl Workspace {
     /// bottom to top, i.e. in drawing order. Floating panes are kept inside
     /// `body`.
     pub fn rects(&self, body: Rect) -> Vec<(PaneId, Rect)> {
+        if let Some(id) = self.zoomed.filter(|id| self.contains(*id)) {
+            return vec![(id, body)];
+        }
         let mut out = self.layout.rects(body);
         out.extend(self.floats.iter().map(|f| (f.id, clamp(f.rect, body))));
         out
@@ -105,6 +113,10 @@ impl Workspace {
 
     /// Focuses `pane`, raising it to the top if it floats.
     pub fn focus(&mut self, pane: PaneId) {
+        // Looking at another pane ends a zoom, as in tmux.
+        if self.zoomed.is_some_and(|z| z != pane) {
+            self.zoomed = None;
+        }
         if let Some(i) = self.floats.iter().position(|f| f.id == pane) {
             let float = self.floats.remove(i);
             self.floats.push(float);
@@ -152,7 +164,32 @@ impl Workspace {
     }
 
     /// Splits the focused tiled pane and focuses `new`.
+    /// Shows the focused pane alone over the whole workspace, or ends that.
+    pub fn toggle_zoom(&mut self) {
+        self.zoomed = match self.zoomed {
+            Some(_) => None,
+            None => Some(self.focus),
+        };
+    }
+
+    /// Exchanges the focused tiled pane with the next or previous one;
+    /// focus moves along with the pane.
+    pub fn swap(&mut self, forward: bool) {
+        let panes = self.layout.panes();
+        let Some(i) = panes.iter().position(|&p| p == self.focus) else {
+            return;
+        };
+        let len = panes.len();
+        let other = panes[if forward {
+            (i + 1) % len
+        } else {
+            (i + len - 1) % len
+        }];
+        self.layout.swap(self.focus, other);
+    }
+
     pub fn split(&mut self, axis: Axis, new: PaneId) -> bool {
+        self.zoomed = None;
         if !self.layout.split(self.focus, axis, new) {
             return false;
         }
@@ -206,6 +243,9 @@ impl Workspace {
 
     /// Removes `pane`. Focus moves to a neighbour if it had it.
     pub fn remove(&mut self, pane: PaneId) {
+        if self.zoomed == Some(pane) {
+            self.zoomed = None;
+        }
         let next = if let Some(i) = self.floats.iter().position(|f| f.id == pane) {
             self.floats.remove(i);
             self.floats.last().map(|f| f.id).or(self.last_tiled)
@@ -305,6 +345,30 @@ mod tests {
         }
         seen.sort_unstable();
         assert_eq!(seen, vec![2, 3, 4]);
+    }
+
+    #[test]
+    fn zoom_shows_one_pane_until_focus_moves() {
+        let mut ws = Workspace::new(1);
+        ws.split(Axis::Row, 2);
+        ws.toggle_zoom();
+        assert_eq!(ws.rects(BODY), vec![(2, BODY)]);
+        ws.focus_direction(Direction::Left, BODY);
+        assert_eq!(ws.zoomed, None);
+        assert_eq!(ws.rects(BODY).len(), 2);
+    }
+
+    #[test]
+    fn swap_moves_the_focused_pane() {
+        let mut ws = Workspace::new(1);
+        ws.split(Axis::Row, 2);
+        ws.split(Axis::Column, 3);
+        ws.focus(1);
+        ws.swap(true);
+        assert_eq!(ws.layout.panes(), vec![2, 1, 3]);
+        assert_eq!(ws.focus, 1);
+        ws.swap(false);
+        assert_eq!(ws.layout.panes(), vec![1, 2, 3]);
     }
 
     #[test]

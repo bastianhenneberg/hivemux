@@ -150,6 +150,28 @@ impl Layout {
             .map(|(id, _)| id)
     }
 
+    /// Exchanges the places of panes `a` and `b`.
+    pub fn swap(&mut self, a: PaneId, b: PaneId) {
+        if let Some(root) = &mut self.root {
+            root.map_leaves(&mut |id| {
+                if id == a {
+                    b
+                } else if id == b {
+                    a
+                } else {
+                    id
+                }
+            });
+        }
+    }
+
+    /// Gives every pane in a row or column the same share of it.
+    pub fn equalize(&mut self) {
+        if let Some(root) = &mut self.root {
+            root.equalize();
+        }
+    }
+
     /// Moves the divider closest to `target` along `dir`'s axis by `cells`
     /// in direction `dir`. Returns false if there is no such divider.
     pub fn resize(&mut self, target: PaneId, dir: Direction, cells: u16, area: Rect) -> bool {
@@ -173,6 +195,46 @@ enum Resize {
 }
 
 impl Node {
+    fn map_leaves(&mut self, f: &mut impl FnMut(PaneId) -> PaneId) {
+        match self {
+            Node::Leaf(id) => *id = f(*id),
+            Node::Split { first, second, .. } => {
+                first.map_leaves(f);
+                second.map_leaves(f);
+            }
+        }
+    }
+
+    /// How many panes share this node's space along `axis`: nested splits
+    /// in the same direction add up, anything else counts as one.
+    fn weight(&self, axis: Axis) -> u32 {
+        match self {
+            Node::Split {
+                axis: own,
+                first,
+                second,
+                ..
+            } if *own == axis => first.weight(axis) + second.weight(axis),
+            _ => 1,
+        }
+    }
+
+    fn equalize(&mut self) {
+        if let Node::Split {
+            axis,
+            ratio,
+            first,
+            second,
+        } = self
+        {
+            let a = first.weight(*axis) as f32;
+            let b = second.weight(*axis) as f32;
+            *ratio = a / (a + b);
+            first.equalize();
+            second.equalize();
+        }
+    }
+
     fn contains(&self, target: PaneId) -> bool {
         match self {
             Node::Leaf(id) => *id == target,
@@ -402,6 +464,30 @@ mod tests {
         // Pane 3 moves the divider between 2 and 3.
         assert!(layout.resize(3, Direction::Up, 5, AREA));
         assert_eq!(layout.rects(AREA)[1].1.height, 15);
+    }
+
+    #[test]
+    fn swap_exchanges_places() {
+        let mut layout = three_panes();
+        layout.swap(1, 3);
+        assert_eq!(layout.panes(), vec![3, 2, 1]);
+        assert_eq!(layout.rects(AREA)[0], (3, Rect::new(0, 0, 50, 40)));
+    }
+
+    #[test]
+    fn equalize_shares_rows_and_columns_evenly() {
+        // 1 | 2 | 3 as nested row splits: each gets a third.
+        let mut layout = Layout::new(1);
+        layout.split(1, Axis::Row, 2);
+        layout.split(2, Axis::Row, 3);
+        layout.resize(1, Direction::Right, 30, AREA);
+        layout.equalize();
+        let widths: Vec<u16> = layout
+            .rects(Rect::new(0, 0, 99, 40))
+            .iter()
+            .map(|(_, r)| r.width)
+            .collect();
+        assert_eq!(widths, vec![33, 33, 33]);
     }
 
     #[test]

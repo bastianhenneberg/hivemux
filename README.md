@@ -49,12 +49,16 @@ a time, attaching from a second terminal detaches the first.
 | `Ctrl+B` `"` | Split the pane top and bottom |
 | `Ctrl+B` `x` | Close the pane (asks first) |
 | `Ctrl+B` `r` | Name the pane (`Ctrl+B` `w` `r` names the workspace) |
+| `Ctrl+B` `z` | Zoom: the pane alone over the whole workspace, again to go back |
+| `Ctrl+B` `{` / `}` | Swap the pane with the previous / next one |
+| `Ctrl+B` `=` | Give all panes equal sizes |
 | `Ctrl+B` `f` … | Floating panes menu: `f` float/tile, `n` new, `o` next, arrows move |
 | `Ctrl+B` `Shift+←↑↓→` | Move a floating pane |
 | `Ctrl+B` `w` … | Workspaces menu: `1`–`9`, `c` new, `n`/`p` next/previous |
 | `Ctrl+B` `1`–`9` | Go to workspace, an empty one starts a shell |
 | `Ctrl+B` `←↑↓→` | Focus the pane in that direction |
 | `Ctrl+B` `o` | Focus the next pane |
+| `Ctrl+B` `;` | Back to the pane focused before, across workspaces |
 | `Ctrl+B` `a` | Jump to the agent that has waited longest for you |
 | `Ctrl+B` `[` | Copy mode: scroll back with vim keys (`Ctrl-U`/`Ctrl-D`, `Ctrl-B`/`Ctrl-F`, `g`/`G`), `v` select, `y` copy, `q` quit |
 | `Ctrl+B` `u` | Copy mode, one page up right away (`PgUp` works too) |

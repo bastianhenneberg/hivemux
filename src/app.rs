@@ -217,6 +217,9 @@ pub struct App {
     unseen: HashSet<PaneId>,
     /// Where the sidebar is drawn, if it is shown.
     sidebar: Option<Rect>,
+    /// The focused pane as last seen, and the one before it, for `Ctrl+B ;`.
+    current_focus: Option<PaneId>,
+    last_focus: Option<PaneId>,
     /// Where the layout is saved to survive a restart, see `persist`.
     state_path: Option<PathBuf>,
     /// The Omarchy theme in use when the theme was last applied.
@@ -266,6 +269,8 @@ impl App {
             agents: HashMap::new(),
             unseen: HashSet::new(),
             sidebar: None,
+            current_focus: None,
+            last_focus: None,
             state_path: persist::path().ok(),
             followed: None,
             last_saved: String::new(),
@@ -436,6 +441,7 @@ impl App {
                 split_sidebar(body, &self.config.sidebar, self.sidebar_focused());
             self.sync_sizes();
             self.update_agents();
+            self.track_focus();
             self.follow_omarchy();
             self.save_state();
             self.render();
@@ -1011,6 +1017,14 @@ impl App {
             Command::CopyMode => self.enter_copy(),
             Command::JumpToWaiting => self.jump_to_waiting(),
             Command::RenamePane => self.start_prompt(RenameTarget::Pane(self.ws.focus)),
+            Command::Zoom => self.ws.toggle_zoom(),
+            Command::Swap(forward) => self.ws.swap(forward),
+            Command::Equalize => self.ws.layout.equalize(),
+            Command::LastPane => {
+                if let Some(last) = self.last_focus.filter(|id| self.panes.contains_key(id)) {
+                    self.reveal(last);
+                }
+            }
             Command::RenameWorkspace => self.start_prompt(RenameTarget::Workspace(self.workspace)),
             Command::FocusSidebar => self.focus_sidebar(),
             Command::ToggleSidebar => {
@@ -1509,6 +1523,21 @@ impl App {
         None
     }
 
+    /// Remembers the previously focused pane whenever focus moves, however
+    /// it moved: keys, mouse, sidebar or workspace switch.
+    fn track_focus(&mut self) {
+        let now = Some(self.ws.focus);
+        if now != self.current_focus {
+            if self
+                .current_focus
+                .is_some_and(|id| self.panes.contains_key(&id))
+            {
+                self.last_focus = self.current_focus;
+            }
+            self.current_focus = now;
+        }
+    }
+
     fn sidebar_focused(&self) -> bool {
         matches!(self.mode, Mode::Sidebar(_))
     }
@@ -1919,6 +1948,14 @@ impl App {
             }
             if floating {
                 title.push(Span::raw("⧉ "));
+            }
+            if self.ws.zoomed == Some(id) {
+                title.push(Span::styled(
+                    "⤢ zoom ",
+                    Style::new()
+                        .fg(theme::current().accent)
+                        .add_modifier(Modifier::BOLD),
+                ));
             }
             let offset = pane.scroll_offset();
             if offset > 0 {

@@ -30,6 +30,10 @@ pub enum Command {
     PrevWorkspace,
     NextFloat,
     RenamePane,
+    Zoom,
+    Swap(bool),
+    Equalize,
+    LastPane,
     RenameWorkspace,
     /// Give the sidebar the keyboard.
     FocusSidebar,
@@ -205,6 +209,27 @@ pub const BINDINGS: &[Binding] = &[
         keys: &[(Key::plain(Char('x')), C::ClosePane)],
     },
     Binding {
+        label: "z",
+        description: "zoom pane",
+        group: Group::Panes,
+        keys: &[(Key::plain(Char('z')), C::Zoom)],
+    },
+    Binding {
+        label: "{ }",
+        description: "swap with prev/next",
+        group: Group::Panes,
+        keys: &[
+            (Key::plain(Char('{')), C::Swap(false)),
+            (Key::plain(Char('}')), C::Swap(true)),
+        ],
+    },
+    Binding {
+        label: "=",
+        description: "equal sizes",
+        group: Group::Panes,
+        keys: &[(Key::plain(Char('=')), C::Equalize)],
+    },
+    Binding {
         label: "r",
         description: "name pane",
         group: Group::Panes,
@@ -258,6 +283,12 @@ pub const BINDINGS: &[Binding] = &[
         description: "waiting agent",
         group: Group::Navigate,
         keys: &[(Key::plain(Char('a')), C::JumpToWaiting)],
+    },
+    Binding {
+        label: ";",
+        description: "last pane",
+        group: Group::Navigate,
+        keys: &[(Key::plain(Char(';')), C::LastPane)],
     },
     Binding {
         label: "o",
@@ -564,7 +595,12 @@ mod tests {
             lookup(Menu::Root, event(Char('b'), KeyModifiers::CONTROL)),
             Some(C::SendPrefix)
         );
-        assert_eq!(lookup(Menu::Root, event(Char('z'), none)), None);
+        assert_eq!(lookup(Menu::Root, event(Char('y'), none)), None);
+        assert_eq!(
+            lookup(Menu::Root, event(Char(';'), none)),
+            Some(C::LastPane)
+        );
+        assert_eq!(lookup(Menu::Root, event(Char('z'), none)), Some(C::Zoom));
     }
 
     #[test]
