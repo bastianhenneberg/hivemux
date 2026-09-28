@@ -18,7 +18,7 @@ Commands:
   kill-server   shut down the server and every pane in it
   help          show this help
 
-Inside hivemux, press Ctrl+B then d to detach.";
+Inside hivemux, press Ctrl+B then q (or d) to detach. The shells keep running.";
 
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();

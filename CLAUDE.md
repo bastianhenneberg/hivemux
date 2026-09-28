@@ -29,7 +29,7 @@ Projekt-Slug: `hivemux`
 ## Befehle
 
 ```bash
-cargo run            # starten, Ctrl+B q beendet
+cargo run            # starten, Ctrl+B q detacht, `cargo run -- kill-server` beendet
 cargo clippy --all-targets -- -D warnings
 cargo fmt
 cargo test

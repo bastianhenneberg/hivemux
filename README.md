@@ -34,7 +34,7 @@ Inspired by [TUIOS](https://github.com/Gaurav-Gosain/tuios) and [herdr](https://
 cargo build --release
 ./target/release/hivemux            # attach to the session, or start one
 ./target/release/hivemux attach     # attach, fail if there is no session
-./target/release/hivemux kill-server
+./target/release/hivemux kill-server  # stop the server and every shell in it
 ```
 
 The first `hivemux` starts a server in the background. It owns the shells and keeps them
@@ -50,8 +50,7 @@ a time, attaching from a second terminal detaches the first.
 | `Ctrl+B` `←↑↓→` | Focus the pane in that direction |
 | `Ctrl+B` `o` | Focus the next pane |
 | `Ctrl+B` `Ctrl+←↑↓→` | Resize by one cell (`Alt` for five) |
-| `Ctrl+B` `d` | Detach, the shells keep running |
-| `Ctrl+B` `q` | Quit, closing every pane |
+| `Ctrl+B` `q` or `d` | Detach, the shells keep running |
 | `Ctrl+B` `Ctrl+B` | Send `Ctrl+B` to the shell |
 
 Focus and resize repeat: for 600 ms after one of them, arrow keys work without the prefix.

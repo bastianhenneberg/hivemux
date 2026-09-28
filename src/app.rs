@@ -348,8 +348,9 @@ impl App {
         }
 
         match key.code {
-            KeyCode::Char('q') => self.quit = true,
-            KeyCode::Char('d') => self.detach(),
+            // Like herdr, q detaches. Stopping the server and its shells
+            // takes `hivemux kill-server`, so no key can do it by accident.
+            KeyCode::Char('q' | 'd') => self.detach(),
             KeyCode::Char('%') => self.split(Axis::Row),
             KeyCode::Char('"') => self.split(Axis::Column),
             KeyCode::Char('x') => self.close(self.focus),
@@ -481,7 +482,7 @@ impl App {
             Mode::Prefix => {
                 spans.push(Span::styled(" PREFIX ", badge));
                 spans.push(Span::styled(
-                    "  % split │  \" split ─  x close  o next  ←↑↓→ focus  ^←↑↓→ resize  d detach  q quit",
+                    "  % split │  \" split ─  x close  o next  ←↑↓→ focus  ^←↑↓→ resize  q/d detach",
                     Style::new().fg(HONEY),
                 ));
             }
@@ -495,7 +496,7 @@ impl App {
             Mode::Normal => {
                 spans.push(Span::styled(
                     format!(
-                        "{} {} · ^B % \" split · ^B d detach",
+                        "{} {} · ^B % \" split · ^B q detach",
                         self.panes.len(),
                         if self.panes.len() == 1 {
                             "pane"
