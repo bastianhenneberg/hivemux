@@ -35,6 +35,8 @@ For scripts and agents:
   send [--pane N] [--no-enter] <text>   type text into a pane
   new [--float] [--workspace N] [-- command args...]
                                         start a command in a new pane
+  rename [--pane N | --workspace N] [--clear | <name>]
+                                        name a pane or a workspace
   hooks                                 print the Claude Code hooks for status
   help          show this help
 
@@ -61,6 +63,7 @@ fn main() -> Result<()> {
         ["list", ..] => cli::list(&args[1..]),
         ["send", ..] => cli::send(&args[1..]),
         ["new", ..] => cli::new(&args[1..]),
+        ["rename", ..] => cli::rename(&args[1..]),
         ["hooks"] => cli::hooks(),
         ["help" | "-h" | "--help"] => {
             println!("{USAGE}");

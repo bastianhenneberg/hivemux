@@ -33,6 +33,9 @@ pub struct SavedPane {
     pub agent: Option<String>,
     /// The agent's session id, from its hooks.
     pub session: Option<String>,
+    /// The name the user gave the pane.
+    #[serde(default)]
+    pub name: Option<String>,
 }
 
 impl Saved {
@@ -152,6 +155,7 @@ mod tests {
                     cwd: Some("/home".into()),
                     agent: Some("claude".into()),
                     session: Some("0b8a-42".into()),
+                    name: Some("backend".into()),
                 },
             ),
             (2, SavedPane::default()),

@@ -48,6 +48,7 @@ a time, attaching from a second terminal detaches the first.
 | `Ctrl+B` `%` | Split the pane side by side |
 | `Ctrl+B` `"` | Split the pane top and bottom |
 | `Ctrl+B` `x` | Close the pane (asks first) |
+| `Ctrl+B` `r` | Name the pane (`Ctrl+B` `w` `r` names the workspace) |
 | `Ctrl+B` `f` … | Floating panes menu: `f` float/tile, `n` new, `o` next, arrows move |
 | `Ctrl+B` `Shift+←↑↓→` | Move a floating pane |
 | `Ctrl+B` `w` … | Workspaces menu: `1`–`9`, `c` new, `n`/`p` next/previous |
@@ -105,6 +106,8 @@ hivemux list [--json]                          # panes with program, state and d
 hivemux send --pane 3 "run the tests"          # type into a pane, then Enter
 hivemux new --workspace 2 -- claude --resume   # start a command in a new pane
 hivemux new --float                            # a floating shell
+hivemux rename "tests"                          # name the pane this runs in
+hivemux rename --workspace 2 api               # name a workspace
 ```
 
 ## Restarts

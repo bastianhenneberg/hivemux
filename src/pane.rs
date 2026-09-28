@@ -29,6 +29,8 @@ pub struct Pane {
     pub reported: Option<AgentState>,
     /// The agent's session id from its hooks, e.g. for `claude --resume`.
     pub session: Option<String>,
+    /// A name the user gave the pane, shown instead of the program.
+    pub name: Option<String>,
     /// Whether the question on the screen was answered: input came while it
     /// was shown. Cleared once no question is shown anymore.
     answered: Cell<bool>,
@@ -126,6 +128,7 @@ impl Pane {
             last_output,
             reported: None,
             session: None,
+            name: None,
             answered: Cell::new(false),
         })
     }

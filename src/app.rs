@@ -29,7 +29,7 @@ use crate::layout::{Axis, MIN_PANE_SIZE, PaneId};
 use crate::menu;
 use crate::pane::{Pane, Spawn};
 use crate::persist::{self, Saved, SavedPane};
-use crate::protocol::{ClientMsg, Reply, Request, ServerMsg};
+use crate::protocol::{ClientMsg, RenameTarget, Reply, Request, ServerMsg};
 use crate::render::ScreenView;
 use crate::sidebar::{self, state_style};
 use crate::theme;
@@ -75,6 +75,14 @@ enum Mode {
     Settings(usize),
     /// Scrolling and selecting with the keyboard, see `App::copy`.
     Copy,
+    /// Typing a name, see `App::prompt`.
+    Prompt,
+}
+
+/// A line of text being typed, for renaming.
+struct Prompt {
+    target: RenameTarget,
+    text: String,
 }
 
 /// A mouse drag in progress.
@@ -226,6 +234,7 @@ pub struct App {
     /// A short message for the control bar, e.g. what was copied. Cleared by
     /// the next key.
     flash: Option<String>,
+    prompt: Option<Prompt>,
     quit: bool,
 }
 
@@ -267,6 +276,7 @@ impl App {
             selection: None,
             copy: None,
             flash: None,
+            prompt: None,
             quit: false,
         };
         app.apply_theme();
@@ -346,6 +356,7 @@ impl App {
                             let _ = pane.write(format!("{command}\r").as_bytes());
                         }
                         pane.session = spec.session.clone();
+                        pane.name = spec.name.clone();
                         self.panes.insert(id, pane);
                     }
                     Err(e) => {
@@ -397,6 +408,7 @@ impl App {
                     cwd: pane.cwd(),
                     agent: agent::agent_name(&argv).map(str::to_owned),
                     session: pane.session.clone(),
+                    name: pane.name.clone(),
                 };
                 (id, saved)
             })
@@ -585,6 +597,7 @@ impl App {
                 Ok(serde_json::json!({ "pane": pane }))
             }
             Request::List => Ok(self.list()),
+            Request::Rename { target, name } => self.rename(target, name),
             Request::Send { pane, text, enter } => {
                 let p = self.panes.get_mut(&pane).ok_or(format!("no pane {pane}"))?;
                 p.note_input();
@@ -635,6 +648,8 @@ impl App {
                     "state": self.shown_state(id).map(AgentState::name),
                     "cwd": pane.cwd(),
                     "session": pane.session,
+                    "name": pane.name,
+                    "workspace_name": ws.name,
                 }));
             }
         }
@@ -804,7 +819,7 @@ impl App {
                     .collect();
                 sidebar::WorkspaceRow {
                     number: n,
-                    name: dir_name(ws.focus),
+                    name: ws.name.clone().unwrap_or_else(|| dir_name(ws.focus)),
                     active: n == self.workspace,
                     state: states.iter().copied().min_by_key(|s| sidebar::urgency(*s)),
                     agents: states.len(),
@@ -820,7 +835,11 @@ impl App {
                 let pane = self.panes.get(&id)?;
                 Some(sidebar::AgentRow {
                     pane: id,
-                    program: pane.program().unwrap_or_default(),
+                    program: pane
+                        .name
+                        .clone()
+                        .or_else(|| pane.program())
+                        .unwrap_or_default(),
                     workspace: self.workspace_of(id)?,
                     dir: dir_name(id),
                     state: self.shown_state(id)?,
@@ -904,6 +923,10 @@ impl App {
                 self.copy_key(key);
                 Ok(())
             }
+            Mode::Prompt => {
+                self.prompt_key(key);
+                Ok(())
+            }
             Mode::Confirm(action) => {
                 self.mode = Mode::Normal;
                 if matches!(key.code, KeyCode::Char('y' | 'Y')) {
@@ -969,6 +992,8 @@ impl App {
             Command::Back => self.mode = Mode::Prefix(Menu::Root),
             Command::CopyMode => self.enter_copy(),
             Command::JumpToWaiting => self.jump_to_waiting(),
+            Command::RenamePane => self.start_prompt(RenameTarget::Pane(self.ws.focus)),
+            Command::RenameWorkspace => self.start_prompt(RenameTarget::Workspace(self.workspace)),
             Command::ToggleSidebar => {
                 self.config.sidebar.enabled = !self.config.sidebar.enabled;
                 if let Err(e) = self.config.save() {
@@ -1453,13 +1478,98 @@ impl App {
             0
         };
         for n in self.workspaces() {
-            let width = format!(" {n} ").len() as u16;
+            let Some(ws) = self.workspace_ref(n) else {
+                continue;
+            };
+            let width = tab_label(n, ws).chars().count() as u16;
             if (x..x + width).contains(&pos.x) {
                 return Some(n);
             }
             x += width;
         }
         None
+    }
+
+    /// Opens the name prompt for `target`, filled with its current name.
+    fn start_prompt(&mut self, target: RenameTarget) {
+        let text = self.name_of(target).unwrap_or_default();
+        self.prompt = Some(Prompt { target, text });
+        self.mode = Mode::Prompt;
+    }
+
+    fn name_of(&self, target: RenameTarget) -> Option<String> {
+        match target {
+            RenameTarget::Pane(id) => self.panes.get(&id)?.name.clone(),
+            RenameTarget::Workspace(n) => self.workspace_ref(n)?.name.clone(),
+        }
+    }
+
+    fn workspace_ref(&self, n: u8) -> Option<&Workspace> {
+        if n == self.workspace {
+            Some(&self.ws)
+        } else {
+            self.hidden.get(&n)
+        }
+    }
+
+    /// Typing a name: Enter saves it, an empty name clears it, Esc cancels.
+    fn prompt_key(&mut self, key: KeyEvent) {
+        let Some(prompt) = &mut self.prompt else {
+            self.mode = Mode::Normal;
+            return;
+        };
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        match key.code {
+            KeyCode::Esc => {
+                self.prompt = None;
+                self.mode = Mode::Normal;
+            }
+            KeyCode::Enter => {
+                let Prompt { target, text } = self.prompt.take().expect("checked above");
+                self.mode = Mode::Normal;
+                let name = Some(text).filter(|t| !t.trim().is_empty());
+                if let Err(e) = self.rename(target, name) {
+                    self.flash = Some(e);
+                }
+            }
+            KeyCode::Backspace if ctrl => prompt.text.clear(),
+            KeyCode::Char('u' | 'w') if ctrl => prompt.text.clear(),
+            KeyCode::Backspace => {
+                prompt.text.pop();
+            }
+            KeyCode::Char(c) if !ctrl && prompt.text.chars().count() < MAX_NAME => {
+                prompt.text.push(c);
+            }
+            _ => {}
+        }
+    }
+
+    /// Names a pane or a workspace, or clears the name with `None`.
+    fn rename(&mut self, target: RenameTarget, name: Option<String>) -> Reply {
+        let name = name
+            .map(|n| {
+                n.chars()
+                    .filter(|c| !c.is_control())
+                    .take(MAX_NAME)
+                    .collect::<String>()
+            })
+            .map(|n| n.trim().to_owned())
+            .filter(|n| !n.is_empty());
+        match target {
+            RenameTarget::Pane(id) => {
+                let pane = self.panes.get_mut(&id).ok_or(format!("no pane {id}"))?;
+                pane.name = name.clone();
+            }
+            RenameTarget::Workspace(n) => {
+                let ws = if n == self.workspace {
+                    &mut self.ws
+                } else {
+                    self.hidden.get_mut(&n).ok_or(format!("no workspace {n}"))?
+                };
+                ws.name = name.clone();
+            }
+        }
+        Ok(serde_json::json!({ "name": name }))
     }
 
     /// Draws with the configured theme from now on. When it follows
@@ -1716,7 +1826,10 @@ impl App {
 
             let mut title = vec![Span::raw(format!(
                 " {id} {} ",
-                pane.program().unwrap_or_else(|| self.title.clone())
+                pane.name
+                    .clone()
+                    .or_else(|| pane.program())
+                    .unwrap_or_else(|| self.title.clone())
             ))];
             if let Some(state) = state {
                 title.push(Span::styled(
@@ -1758,7 +1871,11 @@ impl App {
             if focused
                 && !matches!(
                     self.mode,
-                    Mode::Confirm(_) | Mode::Help | Mode::Menu(_) | Mode::Settings(_)
+                    Mode::Confirm(_)
+                        | Mode::Help
+                        | Mode::Menu(_)
+                        | Mode::Settings(_)
+                        | Mode::Prompt
                 )
                 && (self.mode != Mode::Copy || copy_cursor.is_some())
                 && let Some(position) = cursor
@@ -1791,6 +1908,7 @@ impl App {
             Mode::Help => menu::draw_help(frame, body),
             Mode::Menu(selected) => menu::draw_quit_menu(frame, body, &self.menu_items(), selected),
             Mode::Confirm(action) => self.draw_confirm(frame, body, action),
+            Mode::Prompt => self.draw_prompt(frame, body),
             Mode::Prefix(_) | Mode::Normal | Mode::Repeat(..) | Mode::Copy => {}
         }
     }
@@ -1822,6 +1940,44 @@ impl App {
                 },
             })
             .collect()
+    }
+
+    /// The name prompt in the middle of the screen, with the terminal cursor
+    /// at the end of the text.
+    fn draw_prompt(&self, frame: &mut Frame, area: Rect) {
+        let Some(prompt) = &self.prompt else { return };
+        let title = match prompt.target {
+            RenameTarget::Pane(id) => format!(" Name pane {id} "),
+            RenameTarget::Workspace(n) => format!(" Name workspace {n} "),
+        };
+        let accent = theme::current().accent;
+        let hint = Style::new().add_modifier(Modifier::DIM);
+        let lines = vec![
+            Line::from(vec![
+                Span::styled("› ", Style::new().fg(accent).add_modifier(Modifier::BOLD)),
+                Span::raw(prompt.text.clone()),
+            ]),
+            Line::default(),
+            Line::styled("Enter save · empty clears the name · Esc cancel", hint),
+        ];
+        let width = (MAX_NAME as u16 + 8).max(56);
+        let popup = centered(area, width, lines.len() as u16 + 2);
+        let block = Block::bordered()
+            .border_type(BorderType::Rounded)
+            .border_style(Style::new().fg(accent))
+            .title(Span::styled(
+                title,
+                Style::new().fg(accent).add_modifier(Modifier::BOLD),
+            ))
+            .padding(Padding::horizontal(2));
+        let inner = block.inner(popup);
+        frame.render_widget(Clear, popup);
+        frame.render_widget(Paragraph::new(lines).block(block), popup);
+        let x = inner.x + 2 + prompt.text.chars().count() as u16;
+        frame.set_cursor_position(Position::new(
+            x.min(inner.right().saturating_sub(1)),
+            inner.y,
+        ));
     }
 
     /// A warning box in the middle of the screen, asking to confirm `action`.
@@ -1953,7 +2109,7 @@ impl App {
                     .any(|(id, (state, _))| *state == AgentState::Blocked && ws.contains(*id));
                 if waiting {
                     Span::styled(
-                        format!(" {n} "),
+                        tab_label(n, ws),
                         Style::new()
                             .fg(theme::current().on_accent)
                             .bg(theme::current().danger)
@@ -1961,14 +2117,14 @@ impl App {
                     )
                 } else if n == self.workspace {
                     Span::styled(
-                        format!(" {n} "),
+                        tab_label(n, ws),
                         Style::new()
                             .fg(theme::current().accent)
                             .bg(theme::current().subtle)
                             .add_modifier(Modifier::BOLD),
                     )
                 } else {
-                    Span::styled(format!(" {n} "), hint)
+                    Span::styled(tab_label(n, ws), hint)
                 }
             })
             .collect()
@@ -1998,6 +2154,13 @@ impl App {
                 spans.push(Span::styled(" SETTINGS ", badge));
                 spans.push(Span::styled(
                     "  ↑↓ select · ←→ Enter change · Esc close",
+                    Style::new().fg(theme::current().accent),
+                ));
+            }
+            Mode::Prompt => {
+                spans.push(Span::styled(" NAME ", badge));
+                spans.push(Span::styled(
+                    "  Enter save · Esc cancel",
                     Style::new().fg(theme::current().accent),
                 ));
             }
@@ -2163,6 +2326,17 @@ fn split_sidebar(body: Rect, config: &config::Sidebar) -> (Rect, Option<Rect>) {
                 ..body
             }),
         ),
+    }
+}
+
+/// Names are cut to this many characters.
+const MAX_NAME: usize = 32;
+
+/// A workspace tab: its number, and its name if it has one.
+fn tab_label(n: u8, ws: &Workspace) -> String {
+    match &ws.name {
+        Some(name) => format!(" {n} {name} "),
+        None => format!(" {n} "),
     }
 }
 

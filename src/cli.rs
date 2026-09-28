@@ -8,7 +8,7 @@ use anyhow::{Context, Result, bail};
 use crate::agent::AgentState;
 use crate::client;
 use crate::layout::PaneId;
-use crate::protocol::Request;
+use crate::protocol::{RenameTarget, Request};
 
 /// `hivemux status <working|blocked|idle|clear> [--pane N]`
 ///
@@ -80,8 +80,8 @@ pub fn list(args: &[String]) -> Result<()> {
         return Ok(());
     }
     println!(
-        "{:<5} {:<3} {:<8} {:<14} {:<8} DIRECTORY",
-        "PANE", "WS", "", "PROGRAM", "STATE"
+        "{:<5} {:<3} {:<8} {:<26} {:<8} DIRECTORY",
+        "PANE", "WS", "", "NAME", "STATE"
     );
     for pane in value.as_array().into_iter().flatten() {
         let text = |key: &str| pane[key].as_str().unwrap_or("-").to_owned();
@@ -93,11 +93,14 @@ pub fn list(args: &[String]) -> Result<()> {
             flags.push("float");
         }
         println!(
-            "{:<5} {:<3} {:<8} {:<14} {:<8} {}",
+            "{:<5} {:<3} {:<8} {:<26} {:<8} {}",
             pane["pane"].to_string(),
             pane["workspace"].to_string(),
             flags.join(","),
-            text("program"),
+            match pane["name"].as_str() {
+                Some(name) => format!("{name} ({})", text("program")),
+                None => text("program"),
+            },
             text("state"),
             text("cwd"),
         );
@@ -118,6 +121,34 @@ pub fn send(args: &[String]) -> Result<()> {
         text: rest.join(" "),
         enter,
     })?;
+    Ok(())
+}
+
+/// `hivemux rename [--pane N | --workspace N] [--clear | <name>...]`
+///
+/// Without a target it names the pane it runs in, so an agent can label its
+/// own pane.
+pub fn rename(args: &[String]) -> Result<()> {
+    let mut rest = args.to_vec();
+    let clear = take_flag(&mut rest, "--clear");
+    let workspace = take_value(&mut rest, "--workspace")?
+        .map(|n| {
+            n.parse::<u8>()
+                .context("--workspace takes a number from 1 to 9")
+        })
+        .transpose()?;
+    let target = match workspace {
+        Some(n) => RenameTarget::Workspace(n),
+        None => RenameTarget::Pane(take_pane(&mut rest)?.context("which pane? use --pane N")?),
+    };
+    let name = if clear {
+        None
+    } else if rest.is_empty() {
+        bail!("usage: hivemux rename [--pane N | --workspace N] [--clear | <name>...]");
+    } else {
+        Some(rest.join(" "))
+    };
+    client::request(Request::Rename { target, name })?;
     Ok(())
 }
 

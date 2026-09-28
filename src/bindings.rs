@@ -29,6 +29,8 @@ pub enum Command {
     NextWorkspace,
     PrevWorkspace,
     NextFloat,
+    RenamePane,
+    RenameWorkspace,
     /// Show or hide the sidebar.
     ToggleSidebar,
     /// Focus the agent waiting longest for the user.
@@ -199,6 +201,12 @@ pub const BINDINGS: &[Binding] = &[
         description: "close pane",
         group: Group::Panes,
         keys: &[(Key::plain(Char('x')), C::ClosePane)],
+    },
+    Binding {
+        label: "r",
+        description: "name pane",
+        group: Group::Panes,
+        keys: &[(Key::plain(Char('r')), C::RenamePane)],
     },
     Binding {
         label: "f",
@@ -430,6 +438,12 @@ pub const BINDINGS: &[Binding] = &[
             (Key::plain(Char('8')), C::Workspace(8)),
             (Key::plain(Char('9')), C::Workspace(9)),
         ],
+    },
+    Binding {
+        label: "r",
+        description: "name workspace",
+        group: Group::Workspaces,
+        keys: &[(Key::plain(Char('r')), C::RenameWorkspace)],
     },
     Binding {
         label: "c",

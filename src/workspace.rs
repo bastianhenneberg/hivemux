@@ -25,6 +25,9 @@ pub struct Workspace {
     /// The tiled pane that had focus last, where focus returns to from a
     /// floating pane.
     last_tiled: Option<PaneId>,
+    /// A name the user gave it, shown instead of the project directory.
+    #[serde(default)]
+    pub name: Option<String>,
 }
 
 impl Workspace {
@@ -35,6 +38,7 @@ impl Workspace {
             floats: Vec::new(),
             focus: pane,
             last_tiled: Some(pane),
+            name: None,
         }
     }
 
@@ -45,6 +49,7 @@ impl Workspace {
             floats: Vec::new(),
             focus: 0,
             last_tiled: None,
+            name: None,
         }
     }
 

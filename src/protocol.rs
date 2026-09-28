@@ -53,6 +53,11 @@ pub enum Request {
         text: String,
         enter: bool,
     },
+    /// Name a pane or a workspace, or clear its name with `None`.
+    Rename {
+        target: RenameTarget,
+        name: Option<String>,
+    },
     /// Start `command` (the shell if empty) in a new pane.
     New {
         command: Vec<String>,
@@ -60,6 +65,13 @@ pub enum Request {
         workspace: Option<u8>,
         cwd: Option<PathBuf>,
     },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RenameTarget {
+    Pane(PaneId),
+    Workspace(u8),
 }
 
 /// The answer to a request: JSON on success, a message on failure.
