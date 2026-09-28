@@ -10,6 +10,10 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use crossterm::event::Event;
+use serde::{Deserialize, Serialize};
+
+use crate::agent::AgentState;
+use crate::layout::PaneId;
 
 /// Frames larger than this are treated as a broken stream.
 const MAX_FRAME: usize = 16 * 1024 * 1024;
@@ -21,7 +25,42 @@ pub enum ClientMsg {
     Event(Event),
     /// Shut the server down, killing all panes.
     KillServer,
+    /// Become the attached client, showing the session. A connection that
+    /// does not send this only makes requests.
+    Attach,
+    /// A command from the CLI or an agent, answered with `ServerMsg::Reply`.
+    Request(Request),
 }
+
+/// Commands for scripts and agents, sent by `hivemux status`, `list`,
+/// `send` and `new`.
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "cmd", rename_all = "kebab-case")]
+pub enum Request {
+    /// Set a pane's agent state, or clear it with `None`.
+    Status {
+        pane: PaneId,
+        state: Option<AgentState>,
+    },
+    /// All panes.
+    List,
+    /// Type `text` into a pane, followed by Enter if `enter`.
+    Send {
+        pane: PaneId,
+        text: String,
+        enter: bool,
+    },
+    /// Start `command` (the shell if empty) in a new pane.
+    New {
+        command: Vec<String>,
+        float: bool,
+        workspace: Option<u8>,
+        cwd: Option<PathBuf>,
+    },
+}
+
+/// The answer to a request: JSON on success, a message on failure.
+pub type Reply = std::result::Result<serde_json::Value, String>;
 
 /// Server to client.
 #[derive(Debug, PartialEq)]
@@ -32,6 +71,8 @@ pub enum ServerMsg {
     Detached,
     /// The server is shutting down.
     Exited,
+    /// The answer to a `ClientMsg::Request`.
+    Reply(Reply),
 }
 
 impl ClientMsg {
@@ -39,6 +80,8 @@ impl ClientMsg {
         match self {
             ClientMsg::Event(event) => write_frame(w, 1, &serde_json::to_vec(event)?),
             ClientMsg::KillServer => write_frame(w, 2, &[]),
+            ClientMsg::Attach => write_frame(w, 3, &[]),
+            ClientMsg::Request(request) => write_frame(w, 4, &serde_json::to_vec(request)?),
         }
     }
 
@@ -50,6 +93,8 @@ impl ClientMsg {
         match tag {
             1 => Ok(Some(ClientMsg::Event(serde_json::from_slice(&payload)?))),
             2 => Ok(Some(ClientMsg::KillServer)),
+            3 => Ok(Some(ClientMsg::Attach)),
+            4 => Ok(Some(ClientMsg::Request(serde_json::from_slice(&payload)?))),
             _ => Err(invalid(format!("unknown client message {tag}"))),
         }
     }
@@ -61,6 +106,7 @@ impl ServerMsg {
             ServerMsg::Output(bytes) => write_frame(w, 1, bytes),
             ServerMsg::Detached => write_frame(w, 2, &[]),
             ServerMsg::Exited => write_frame(w, 3, &[]),
+            ServerMsg::Reply(reply) => write_frame(w, 4, &serde_json::to_vec(reply)?),
         }
     }
 
@@ -73,6 +119,7 @@ impl ServerMsg {
             1 => Ok(Some(ServerMsg::Output(payload))),
             2 => Ok(Some(ServerMsg::Detached)),
             3 => Ok(Some(ServerMsg::Exited)),
+            4 => Ok(Some(ServerMsg::Reply(serde_json::from_slice(&payload)?))),
             _ => Err(invalid(format!("unknown server message {tag}"))),
         }
     }
@@ -145,6 +192,17 @@ mod tests {
             ClientMsg::Event(Event::Resize(120, 40)),
             ClientMsg::Event(Event::Paste("hallo\nwelt".into())),
             ClientMsg::KillServer,
+            ClientMsg::Attach,
+            ClientMsg::Request(Request::Status {
+                pane: 3,
+                state: Some(AgentState::Blocked),
+            }),
+            ClientMsg::Request(Request::New {
+                command: vec!["claude".into(), "--resume".into()],
+                float: true,
+                workspace: Some(2),
+                cwd: None,
+            }),
         ];
         let mut wire = Vec::new();
         for msg in &msgs {
@@ -164,6 +222,8 @@ mod tests {
             ServerMsg::Output(Vec::new()),
             ServerMsg::Detached,
             ServerMsg::Exited,
+            ServerMsg::Reply(Ok(serde_json::json!({"pane": 4}))),
+            ServerMsg::Reply(Err("no pane 9".into())),
         ];
         let mut wire = Vec::new();
         for msg in &msgs {

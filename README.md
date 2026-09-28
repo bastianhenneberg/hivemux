@@ -25,7 +25,7 @@ Inspired by [TUIOS](https://github.com/Gaurav-Gosain/tuios) and [herdr](https://
 3. ~~Server/client split with detach and reattach~~ ✓
 4. ~~Floating windows and workspaces~~ ✓
 5. ~~Copy mode, scrollback, mouse~~ ✓
-6. Agent status, socket API
+6. ~~Agent status, socket API~~ ✓
 7. Layout persistence across restarts
 
 ## Build
@@ -54,6 +54,7 @@ a time, attaching from a second terminal detaches the first.
 | `Ctrl+B` `1`–`9` | Go to workspace, an empty one starts a shell |
 | `Ctrl+B` `←↑↓→` | Focus the pane in that direction |
 | `Ctrl+B` `o` | Focus the next pane |
+| `Ctrl+B` `a` | Jump to the agent that has waited longest for you |
 | `Ctrl+B` `[` | Copy mode: scroll back with vim keys (`Ctrl-U`/`Ctrl-D`, `Ctrl-B`/`Ctrl-F`, `g`/`G`), `v` select, `y` copy, `q` quit |
 | `Ctrl+B` `u` | Copy mode, one page up right away (`PgUp` works too) |
 | `Ctrl+B` `Ctrl+←↑↓→` | Resize by one cell (`Alt` for five), floating panes too |
@@ -68,6 +69,33 @@ Pressing `Ctrl+B` opens a menu with every key, like which-key in Neovim. `f` and
 submenus, `⌫` goes back.
 Focus, move and resize repeat: for 600 ms after one of them, arrow keys work without the prefix.
 A pane closes when its shell exits, hivemux exits with the last pane.
+
+## Agents
+
+Every pane running a coding agent shows what it is doing: `● working`, `◆ blocked` (it waits
+for you) or `✓ idle`. A workspace tab turns red when an agent there waits, the bell rings, and
+`Ctrl+B a` takes you to it.
+
+hivemux recognises claude, codex, opencode, aider, gemini, crush, goose, amp, cursor-agent, qwen
+and kilo. It guesses from their output and from questions on the screen. For exact states, let
+the agent report them with hooks. For Claude Code:
+
+```bash
+cargo install --path .     # puts hivemux on your PATH
+hivemux hooks              # prints the hooks for ~/.claude/settings.json
+```
+
+The hooks call `hivemux status working|blocked|idle`, which knows its pane from
+`$HIVEMUX_PANE` and does nothing outside hivemux.
+
+Scripts and agents can drive hivemux too:
+
+```bash
+hivemux list [--json]                          # panes with program, state and directory
+hivemux send --pane 3 "run the tests"          # type into a pane, then Enter
+hivemux new --workspace 2 -- claude --resume   # start a command in a new pane
+hivemux new --float                            # a floating shell
+```
 
 ## Mouse
 

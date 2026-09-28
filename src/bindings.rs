@@ -29,6 +29,8 @@ pub enum Command {
     NextWorkspace,
     PrevWorkspace,
     NextFloat,
+    /// Focus the agent waiting longest for the user.
+    JumpToWaiting,
     /// Scroll back and select text with the keyboard.
     CopyMode,
     /// Copy mode, scrolled up half a page right away.
@@ -238,6 +240,12 @@ pub const BINDINGS: &[Binding] = &[
             (Key::plain(Char('u')), C::ScrollBack),
             (Key::plain(KeyCode::PageUp), C::ScrollBack),
         ],
+    },
+    Binding {
+        label: "a",
+        description: "waiting agent",
+        group: Group::Navigate,
+        keys: &[(Key::plain(Char('a')), C::JumpToWaiting)],
     },
     Binding {
         label: "o",

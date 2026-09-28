@@ -34,7 +34,7 @@ pub fn run() -> Result<()> {
             }
         })?;
 
-    let result = App::run(tx, &rx);
+    let result = App::run(tx, &rx, path.clone());
     let _ = fs::remove_file(&path);
     result
 }

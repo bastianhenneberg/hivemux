@@ -22,7 +22,7 @@ use crossterm::terminal::{
     enable_raw_mode,
 };
 
-use crate::protocol::{ClientMsg, ServerMsg, socket_path};
+use crate::protocol::{ClientMsg, Request, ServerMsg, socket_path};
 
 /// How a client session ended.
 enum Outcome {
@@ -77,9 +77,25 @@ pub fn kill_server() -> Result<()> {
     Ok(())
 }
 
+/// Sends `request` to the running server and returns its answer.
+pub fn request(request: Request) -> Result<serde_json::Value> {
+    let path = socket_path()?;
+    let mut stream = UnixStream::connect(&path).context("no hivemux server running")?;
+    ClientMsg::Request(request).write_to(&mut stream)?;
+    loop {
+        match ServerMsg::read_from(&mut stream)? {
+            Some(ServerMsg::Reply(Ok(value))) => return Ok(value),
+            Some(ServerMsg::Reply(Err(message))) => bail!(message),
+            Some(_) => {}
+            None => bail!("the server closed the connection"),
+        }
+    }
+}
+
 fn session(mut stream: UnixStream) -> Result<Outcome> {
     let mut writer = stream.try_clone()?;
     let (cols, rows) = terminal::size()?;
+    ClientMsg::Attach.write_to(&mut writer)?;
     ClientMsg::Event(Event::Resize(cols, rows)).write_to(&mut writer)?;
 
     // Input is forwarded on its own thread. It stays blocked in
@@ -102,6 +118,7 @@ fn session(mut stream: UnixStream) -> Result<Outcome> {
             }
             Ok(Some(ServerMsg::Detached)) => return Ok(Outcome::Detached),
             Ok(Some(ServerMsg::Exited)) => return Ok(Outcome::Exited),
+            Ok(Some(ServerMsg::Reply(_))) => {}
             Ok(None) | Err(_) => return Ok(Outcome::ConnectionLost),
         }
     }

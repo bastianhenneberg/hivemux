@@ -21,13 +21,14 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Clear, Padding, Paragraph};
 use ratatui::{Frame, Terminal, TerminalOptions, Viewport};
 
+use crate::agent::AgentState;
 use crate::bindings::{self, Command, Menu};
 use crate::config::{Bars, Config, Placement, SETTINGS};
 use crate::keys;
 use crate::layout::{Axis, MIN_PANE_SIZE, PaneId};
 use crate::menu::{self, HONEY};
-use crate::pane::Pane;
-use crate::protocol::{ClientMsg, ServerMsg};
+use crate::pane::{Pane, Spawn};
+use crate::protocol::{ClientMsg, Reply, Request, ServerMsg};
 use crate::render::ScreenView;
 use crate::workspace::Workspace;
 use crate::{clipboard, mouse};
@@ -36,6 +37,9 @@ use crate::{clipboard, mouse};
 /// repeats it without pressing the prefix again. Same idea as tmux's
 /// `repeat-time`.
 const REPEAT_TIME: Duration = Duration::from_millis(600);
+
+/// How often the server looks at agent states without other events.
+const TICK: Duration = Duration::from_millis(500);
 
 /// The screen size assumed until a client tells us its real one.
 const DEFAULT_SCREEN: Rect = Rect::new(0, 0, 80, 24);
@@ -187,7 +191,13 @@ pub struct App {
     /// Where the panes are drawn, i.e. the screen minus the status bar.
     body: Rect,
     client: Option<Client>,
+    /// Every open connection, attached or not, to answer requests on.
+    conns: HashMap<ClientId, UnixStream>,
     next_client_id: ClientId,
+    /// The server socket, handed to every pane as `HIVEMUX_SOCKET`.
+    socket: PathBuf,
+    /// The last agent state seen per pane, and since when it holds.
+    agents: HashMap<PaneId, (AgentState, Instant)>,
     events: Sender<AppEvent>,
     title: String,
     config: Config,
@@ -207,14 +217,24 @@ pub struct App {
 impl App {
     /// Starts with one pane and runs until the last pane is closed or the
     /// server is told to shut down.
-    pub fn run(events: Sender<AppEvent>, rx: &Receiver<AppEvent>) -> Result<()> {
+    pub fn run(events: Sender<AppEvent>, rx: &Receiver<AppEvent>, socket: PathBuf) -> Result<()> {
         let (config, config_error) = Config::load();
         if let Some(e) = &config_error {
             eprintln!("config: {e}");
         }
         let body = screen_layout(DEFAULT_SCREEN, &config.bars).body;
         let inner = pane_inner(body);
-        let first = Pane::spawn(0, inner.height, inner.width, None, events.clone())?;
+        let first = Pane::spawn(
+            Spawn {
+                id: 0,
+                rows: inner.height,
+                cols: inner.width,
+                cwd: None,
+                command: &[],
+                socket: &socket,
+            },
+            events.clone(),
+        )?;
 
         let mut app = App {
             panes: HashMap::from([(0, first)]),
@@ -225,7 +245,10 @@ impl App {
             screen: DEFAULT_SCREEN,
             body,
             client: None,
+            conns: HashMap::new(),
             next_client_id: 0,
+            socket,
+            agents: HashMap::new(),
             events,
             title: shell_name(),
             config,
@@ -248,6 +271,7 @@ impl App {
         while !self.quit {
             self.body = screen_layout(self.screen, &self.config.bars).body;
             self.sync_sizes();
+            self.update_agents();
             self.render();
 
             // Block for the next event, then take everything else that is
@@ -263,9 +287,11 @@ impl App {
                         Err(RecvTimeoutError::Disconnected) => break,
                     }
                 }
-                _ => match rx.recv() {
+                // Wake up now and then to notice agents going quiet.
+                _ => match rx.recv_timeout(TICK) {
                     Ok(event) => event,
-                    Err(_) => break,
+                    Err(RecvTimeoutError::Timeout) => continue,
+                    Err(RecvTimeoutError::Disconnected) => break,
                 },
             };
             self.handle(event);
@@ -305,16 +331,27 @@ impl App {
                 self.close(id);
                 Ok(())
             }
-            AppEvent::ClientConnected(stream) => self.attach(stream),
-            AppEvent::ClientMsg(id, msg) if self.client.as_ref().is_some_and(|c| c.id == id) => {
-                self.handle_client_msg(msg)
-            }
+            AppEvent::ClientConnected(stream) => self.connect(stream),
             AppEvent::ClientMsg(_, ClientMsg::KillServer) => {
                 self.quit = true;
                 Ok(())
             }
+            AppEvent::ClientMsg(id, ClientMsg::Attach) => self.attach(id),
+            AppEvent::ClientMsg(id, ClientMsg::Request(request)) => {
+                let reply = self.request(request);
+                match self.conns.get_mut(&id) {
+                    Some(stream) => ServerMsg::Reply(reply).write_to(stream).map_err(Into::into),
+                    None => Ok(()),
+                }
+            }
+            AppEvent::ClientMsg(id, ClientMsg::Event(event))
+                if self.client.as_ref().is_some_and(|c| c.id == id) =>
+            {
+                self.handle_event(event)
+            }
             AppEvent::ClientMsg(..) => Ok(()),
             AppEvent::ClientGone(id) => {
+                self.conns.remove(&id);
                 if self.client.as_ref().is_some_and(|c| c.id == id) {
                     self.client = None;
                 }
@@ -326,10 +363,10 @@ impl App {
         }
     }
 
-    /// Makes `stream` the attached client, detaching the previous one.
-    fn attach(&mut self, stream: UnixStream) -> Result<()> {
-        self.detach();
-
+    /// Starts reading from a new connection. It only shows the session once
+    /// it sends `ClientMsg::Attach`, so scripts can make requests without
+    /// taking the screen from the attached client.
+    fn connect(&mut self, stream: UnixStream) -> Result<()> {
         let id = self.next_client_id;
         self.next_client_id += 1;
 
@@ -345,7 +382,17 @@ impl App {
                 }
                 let _ = events.send(AppEvent::ClientGone(id));
             })?;
+        self.conns.insert(id, stream);
+        Ok(())
+    }
 
+    /// Makes connection `id` the attached client, detaching the previous one.
+    fn attach(&mut self, id: ClientId) -> Result<()> {
+        let Some(stream) = self.conns.get(&id) else {
+            return Ok(());
+        };
+        let stream = stream.try_clone()?;
+        self.detach();
         let terminal = Client::terminal_for(&stream, self.screen)?;
         self.client = Some(Client {
             id,
@@ -362,18 +409,205 @@ impl App {
         }
     }
 
-    fn handle_client_msg(&mut self, msg: ClientMsg) -> Result<()> {
-        match msg {
-            ClientMsg::Event(Event::Key(key)) => self.handle_key(key),
-            ClientMsg::Event(Event::Paste(text)) => self.paste(&text),
-            ClientMsg::Event(Event::Resize(cols, rows)) => self.resize_screen(cols, rows),
-            ClientMsg::Event(Event::Mouse(event)) => self.mouse(event),
-            ClientMsg::Event(_) => Ok(()),
-            ClientMsg::KillServer => {
-                self.quit = true;
-                Ok(())
+    fn handle_event(&mut self, event: Event) -> Result<()> {
+        match event {
+            Event::Key(key) => self.handle_key(key),
+            Event::Paste(text) => self.paste(&text),
+            Event::Resize(cols, rows) => self.resize_screen(cols, rows),
+            Event::Mouse(event) => self.mouse(event),
+            _ => Ok(()),
+        }
+    }
+
+    /// Answers a request from `hivemux status`, `list`, `send` or `new`.
+    fn request(&mut self, request: Request) -> Reply {
+        match request {
+            Request::Status { pane, state } => {
+                let p = self.panes.get_mut(&pane).ok_or(format!("no pane {pane}"))?;
+                p.reported = state;
+                Ok(serde_json::json!({ "pane": pane }))
+            }
+            Request::List => Ok(self.list()),
+            Request::Send { pane, text, enter } => {
+                let p = self.panes.get_mut(&pane).ok_or(format!("no pane {pane}"))?;
+                p.note_input();
+                let bracketed = p.screen().screen().bracketed_paste();
+                let mut bytes = Vec::new();
+                if bracketed && text.contains('\n') {
+                    bytes.extend_from_slice(b"\x1b[200~");
+                    bytes.extend_from_slice(text.as_bytes());
+                    bytes.extend_from_slice(b"\x1b[201~");
+                } else {
+                    bytes.extend_from_slice(text.as_bytes());
+                }
+                p.write(&bytes).map_err(|e| e.to_string())?;
+                if enter {
+                    // A separate write, so programs see Enter as a key and
+                    // not as part of a paste.
+                    thread::sleep(Duration::from_millis(20));
+                    p.write(b"\r").map_err(|e| e.to_string())?;
+                }
+                Ok(serde_json::json!({ "pane": pane }))
+            }
+            Request::New {
+                command,
+                float,
+                workspace,
+                cwd,
+            } => self.new_pane(&command, float, workspace, cwd),
+        }
+    }
+
+    /// Every pane with its workspace, program, state and directory.
+    fn list(&self) -> serde_json::Value {
+        let mut panes = Vec::new();
+        let mut all: Vec<(u8, &Workspace)> = self.hidden.iter().map(|(n, ws)| (*n, ws)).collect();
+        all.push((self.workspace, &self.ws));
+        all.sort_by_key(|(n, _)| *n);
+        for (n, ws) in all {
+            for (id, _) in ws.rects(self.body) {
+                let Some(pane) = self.panes.get(&id) else {
+                    continue;
+                };
+                panes.push(serde_json::json!({
+                    "pane": id,
+                    "workspace": n,
+                    "floating": ws.is_floating(id),
+                    "focused": n == self.workspace && id == self.ws.focus,
+                    "program": pane.program(),
+                    "state": pane.agent_state().map(AgentState::name),
+                    "cwd": pane.cwd(),
+                }));
             }
         }
+        serde_json::Value::Array(panes)
+    }
+
+    /// Starts `command` in a new pane: floating or split off the focused one,
+    /// in workspace `n` or the active one. Hidden workspaces stay hidden.
+    fn new_pane(
+        &mut self,
+        command: &[String],
+        float: bool,
+        workspace: Option<u8>,
+        cwd: Option<PathBuf>,
+    ) -> Reply {
+        let n = workspace.unwrap_or(self.workspace);
+        if !(1..=9).contains(&n) {
+            return Err(format!("no workspace {n}, there are 1 to 9"));
+        }
+        let cwd = cwd.or_else(|| self.focused_cwd());
+        let id = self.next_id;
+        self.next_id += 1;
+
+        let body = self.body;
+        let ws = if n == self.workspace {
+            &mut self.ws
+        } else {
+            self.hidden.entry(n).or_insert_with(Workspace::empty)
+        };
+        if float {
+            ws.add_float(id, body);
+        } else if ws.is_empty() {
+            *ws = Workspace::new(id);
+        } else if ws.is_floating(ws.focus) || !ws.split(Axis::Row, id) {
+            ws.add_float(id, body);
+        }
+        let rect = ws
+            .rects(body)
+            .into_iter()
+            .find_map(|(pane, rect)| (pane == id).then_some(rect))
+            .unwrap_or(body);
+
+        let inner = pane_inner(rect);
+        let spawned = Pane::spawn(
+            Spawn {
+                id,
+                rows: inner.height,
+                cols: inner.width,
+                cwd: cwd.as_deref(),
+                command,
+                socket: &self.socket,
+            },
+            self.events.clone(),
+        );
+        match spawned {
+            Ok(pane) => {
+                self.panes.insert(id, pane);
+                Ok(serde_json::json!({ "pane": id, "workspace": n }))
+            }
+            Err(e) => {
+                let ws = if n == self.workspace {
+                    &mut self.ws
+                } else {
+                    self.hidden.get_mut(&n).expect("inserted above")
+                };
+                ws.remove(id);
+                if n != self.workspace && ws.is_empty() {
+                    self.hidden.remove(&n);
+                }
+                Err(format!("{e:#}"))
+            }
+        }
+    }
+
+    /// Looks at what every agent is doing. When one starts waiting for the
+    /// user where the user is not looking, it rings the bell and says so.
+    fn update_agents(&mut self) {
+        let now = Instant::now();
+        let mut seen = HashMap::new();
+        for (&id, pane) in &self.panes {
+            let Some(state) = pane.agent_state() else {
+                continue;
+            };
+            let since = match self.agents.get(&id) {
+                Some(&(old, since)) if old == state => since,
+                _ => now,
+            };
+            seen.insert(id, (state, since));
+        }
+        for (&id, &(state, _)) in &seen {
+            let was = self.agents.get(&id).map(|(s, _)| *s);
+            let in_view = self.ws.contains(id) && (self.ws.focus == id || self.client.is_none());
+            if state == AgentState::Blocked && was != Some(AgentState::Blocked) && !in_view {
+                self.flash = Some(format!("pane {id} needs you · ^B a"));
+                if let Some(client) = &mut self.client {
+                    let _ = client.send(&ServerMsg::Output(b"\x07".to_vec()));
+                }
+            }
+        }
+        self.agents = seen;
+    }
+
+    /// Focuses the agent that has been waiting longest, in any workspace.
+    /// Pressed again, it goes on to the next one.
+    fn jump_to_waiting(&mut self) {
+        let mut waiting: Vec<(PaneId, Instant)> = self
+            .agents
+            .iter()
+            .filter(|(_, (state, _))| *state == AgentState::Blocked)
+            .map(|(&id, &(_, since))| (id, since))
+            .collect();
+        waiting.sort_by_key(|&(id, since)| (since, id));
+        let Some(&(target, _)) = waiting
+            .iter()
+            .find(|(id, _)| *id != self.ws.focus)
+            .or(waiting.first())
+        else {
+            self.flash = Some("no agent is waiting".into());
+            return;
+        };
+        if !self.ws.contains(target) {
+            let Some(n) = self
+                .hidden
+                .iter()
+                .find_map(|(n, ws)| ws.contains(target).then_some(*n))
+            else {
+                return;
+            };
+            self.show(n);
+        }
+        self.ws.focus(target);
     }
 
     /// Adopts the client's new screen size. The terminal is rebuilt rather
@@ -443,6 +677,7 @@ impl App {
                 }
                 let app_cursor = pane.screen().screen().application_cursor();
                 if let Some(bytes) = keys::encode(key, app_cursor) {
+                    pane.note_input();
                     pane.write(&bytes)?;
                 }
                 Ok(())
@@ -476,6 +711,7 @@ impl App {
             Command::Open(menu) => self.mode = Mode::Prefix(menu),
             Command::Back => self.mode = Mode::Prefix(Menu::Root),
             Command::CopyMode => self.enter_copy(),
+            Command::JumpToWaiting => self.jump_to_waiting(),
             Command::ScrollBack => {
                 self.enter_copy();
                 let page = self.focused_inner().map_or(1, |r| r.height as isize);
@@ -1007,13 +1243,18 @@ impl App {
             .find_map(|(pane, rect)| (pane == id).then_some(rect))
             .unwrap_or(self.body);
         let inner = pane_inner(rect);
-        match Pane::spawn(
-            id,
-            inner.height,
-            inner.width,
-            cwd.as_deref(),
+        let spawned = Pane::spawn(
+            Spawn {
+                id,
+                rows: inner.height,
+                cols: inner.width,
+                cwd: cwd.as_deref(),
+                command: &[],
+                socket: &self.socket,
+            },
             self.events.clone(),
-        ) {
+        );
+        match spawned {
             Ok(pane) => {
                 self.panes.insert(id, pane);
             }
@@ -1095,13 +1336,18 @@ impl App {
         let cwd = self.focused_cwd();
         let id = self.next_id;
         let inner = pane_inner(self.body);
-        let pane = match Pane::spawn(
-            id,
-            inner.height,
-            inner.width,
-            cwd.as_deref(),
+        let spawned = Pane::spawn(
+            Spawn {
+                id,
+                rows: inner.height,
+                cols: inner.width,
+                cwd: cwd.as_deref(),
+                command: &[],
+                socket: &self.socket,
+            },
             self.events.clone(),
-        ) {
+        );
+        let pane = match spawned {
             Ok(pane) => pane,
             Err(e) => {
                 eprintln!("failed to start a shell for workspace {n}: {e:#}");
@@ -1153,6 +1399,7 @@ impl App {
         let Some(pane) = self.panes.get_mut(&self.ws.focus) else {
             return Ok(());
         };
+        pane.note_input();
         let bracketed = pane.screen().screen().bracketed_paste();
         if bracketed {
             pane.write(b"\x1b[200~")?;
@@ -1173,25 +1420,34 @@ impl App {
             };
             let focused = id == self.ws.focus;
             let floating = self.ws.is_floating(id);
-            let border = if focused {
-                Style::new().fg(HONEY)
-            } else {
-                Style::new().fg(Color::DarkGray)
+            let state = self.agents.get(&id).map(|(state, _)| *state);
+            let border = match (focused, state) {
+                (_, Some(AgentState::Blocked)) => Style::new().fg(Color::LightRed),
+                (true, _) => Style::new().fg(HONEY),
+                (false, _) => Style::new().fg(Color::DarkGray),
             };
+
+            let mut title = vec![Span::raw(format!(
+                " {id} {} ",
+                pane.program().unwrap_or_else(|| self.title.clone())
+            ))];
+            if let Some(state) = state {
+                title.push(Span::styled(
+                    format!("{} {} ", state.symbol(), state.name()),
+                    state_style(state),
+                ));
+            }
+            if floating {
+                title.push(Span::raw("⧉ "));
+            }
             let offset = pane.scroll_offset();
-            let scrolled = if offset > 0 {
-                format!("⇡{offset}/{} ", pane.history_len())
-            } else {
-                String::new()
-            };
+            if offset > 0 {
+                title.push(Span::raw(format!("⇡{offset}/{} ", pane.history_len())));
+            }
             let block = Block::bordered()
                 .border_type(BorderType::Rounded)
                 .border_style(border)
-                .title(if floating {
-                    format!(" {id} {} ⧉ {scrolled}", self.title)
-                } else {
-                    format!(" {id} {} {scrolled}", self.title)
-                });
+                .title(Line::from(title));
             let inner = block.inner(rect);
             if floating {
                 frame.render_widget(Clear, rect);
@@ -1379,7 +1635,24 @@ impl App {
         self.workspaces()
             .into_iter()
             .map(|n| {
-                if n == self.workspace {
+                let ws = if n == self.workspace {
+                    &self.ws
+                } else {
+                    &self.hidden[&n]
+                };
+                let waiting = self
+                    .agents
+                    .iter()
+                    .any(|(id, (state, _))| *state == AgentState::Blocked && ws.contains(*id));
+                if waiting {
+                    Span::styled(
+                        format!(" {n} "),
+                        Style::new()
+                            .fg(Color::Black)
+                            .bg(Color::LightRed)
+                            .add_modifier(Modifier::BOLD),
+                    )
+                } else if n == self.workspace {
                     Span::styled(
                         format!(" {n} "),
                         Style::new()
@@ -1453,12 +1726,31 @@ impl App {
                 ));
             }
             Mode::Normal if self.flash.is_some() => {
-                spans.push(Span::styled(
-                    format!("✓ {}", self.flash.as_deref().unwrap_or_default()),
-                    Style::new().fg(HONEY),
-                ));
+                let text = self.flash.as_deref().unwrap_or_default();
+                // Messages about waiting agents are warnings, the rest are
+                // confirmations like "copied".
+                if self.agents.values().any(|(s, _)| *s == AgentState::Blocked)
+                    && text.contains("needs you")
+                {
+                    spans.push(Span::styled(
+                        format!("◆ {text}"),
+                        state_style(AgentState::Blocked),
+                    ));
+                } else {
+                    spans.push(Span::styled(format!("✓ {text}"), Style::new().fg(HONEY)));
+                }
             }
             Mode::Normal => {
+                for state in [AgentState::Blocked, AgentState::Working, AgentState::Idle] {
+                    let count = self.agents.values().filter(|(s, _)| *s == state).count();
+                    if count > 0 {
+                        spans.push(Span::styled(
+                            format!("{} {count} {}", state.symbol(), state.name()),
+                            state_style(state),
+                        ));
+                        spans.push(Span::styled(" · ", hint));
+                    }
+                }
                 spans.push(Span::styled(
                     format!(
                         "{} {} · ^B menu · ^B ? all keys",
@@ -1520,6 +1812,16 @@ fn screen_layout(screen: Rect, bars: &Bars) -> ScreenLayout {
 }
 
 const BADGE: &str = " ⬢ hivemux ";
+
+fn state_style(state: AgentState) -> Style {
+    match state {
+        AgentState::Working => Style::new().fg(HONEY),
+        AgentState::Blocked => Style::new()
+            .fg(Color::LightRed)
+            .add_modifier(Modifier::BOLD),
+        AgentState::Idle => Style::new().fg(Color::LightGreen),
+    }
+}
 
 fn badge_style() -> Style {
     Style::new()

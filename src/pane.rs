@@ -1,15 +1,18 @@
 //! A pane: one child process running in a pseudo terminal, plus the VT state
 //! its output has produced.
 
+use std::cell::Cell;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread;
+use std::time::Instant;
 
 use anyhow::{Context, Result};
 use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
 
+use crate::agent::{self, AgentState};
 use crate::app::AppEvent;
 use crate::layout::PaneId;
 
@@ -21,22 +24,35 @@ pub struct Pane {
     writer: Box<dyn Write + Send>,
     child: Box<dyn Child + Send + Sync>,
     size: (u16, u16),
+    last_output: Arc<Mutex<Instant>>,
+    /// The agent state the program reported with `hivemux status`.
+    pub reported: Option<AgentState>,
+    /// Whether the question on the screen was answered: input came while it
+    /// was shown. Cleared once no question is shown anymore.
+    answered: Cell<bool>,
+}
+
+/// What to run in a new pane and where.
+pub struct Spawn<'a> {
+    pub id: PaneId,
+    pub rows: u16,
+    pub cols: u16,
+    /// Start here, or in the server's directory without it.
+    pub cwd: Option<&'a Path>,
+    /// Run this, or the user's shell when empty.
+    pub command: &'a [String],
+    /// The server socket, handed to the program so `hivemux` finds it.
+    pub socket: &'a Path,
 }
 
 impl Pane {
-    /// Spawns the user's default shell in a new pty of `rows` x `cols`.
-    /// Output is fed into the VT parser on a background thread, which sends
-    /// `AppEvent::PtyOutput` after every chunk and `AppEvent::PtyExited(id)` at EOF.
-    /// The shell starts in `cwd`, or in the server's directory without one.
-    pub fn spawn(
-        id: PaneId,
-        rows: u16,
-        cols: u16,
-        cwd: Option<&Path>,
-        events: Sender<AppEvent>,
-    ) -> Result<Self> {
-        let rows = rows.max(1);
-        let cols = cols.max(1);
+    /// Starts `spawn.command` in a new pty. Output is fed into the VT parser
+    /// on a background thread, which sends `AppEvent::PtyOutput` after every
+    /// chunk and `AppEvent::PtyExited(id)` at EOF.
+    pub fn spawn(spawn: Spawn, events: Sender<AppEvent>) -> Result<Self> {
+        let id = spawn.id;
+        let rows = spawn.rows.max(1);
+        let cols = spawn.cols.max(1);
 
         let pair = native_pty_system()
             .openpty(PtySize {
@@ -47,8 +63,12 @@ impl Pane {
             })
             .context("failed to open pty")?;
 
-        let mut cmd = CommandBuilder::new_default_prog();
-        match cwd {
+        let mut cmd = if spawn.command.is_empty() {
+            CommandBuilder::new_default_prog()
+        } else {
+            CommandBuilder::from_argv(spawn.command.iter().map(Into::into).collect())
+        };
+        match spawn.cwd {
             Some(cwd) if cwd.is_dir() => cmd.cwd(cwd),
             _ => {
                 if let Ok(cwd) = std::env::current_dir() {
@@ -58,6 +78,8 @@ impl Pane {
         }
         cmd.env("TERM", "xterm-256color");
         cmd.env("HIVEMUX", "1");
+        cmd.env("HIVEMUX_PANE", id.to_string());
+        cmd.env("HIVEMUX_SOCKET", spawn.socket);
 
         let child = pair
             .slave
@@ -72,6 +94,8 @@ impl Pane {
         let parser = Arc::new(Mutex::new(vt100::Parser::new(rows, cols, SCROLLBACK_LINES)));
 
         let reader_parser = Arc::clone(&parser);
+        let last_output = Arc::new(Mutex::new(Instant::now()));
+        let reader_last_output = Arc::clone(&last_output);
         thread::Builder::new()
             .name("pty-reader".into())
             .spawn(move || {
@@ -81,6 +105,7 @@ impl Pane {
                         Ok(0) | Err(_) => break,
                         Ok(n) => {
                             reader_parser.lock().unwrap().process(&buf[..n]);
+                            *reader_last_output.lock().unwrap() = Instant::now();
                             if events.send(AppEvent::PtyOutput).is_err() {
                                 return;
                             }
@@ -96,18 +121,77 @@ impl Pane {
             writer,
             child,
             size: (rows, cols),
+            last_output,
+            reported: None,
+            answered: Cell::new(false),
         })
+    }
+
+    /// The process in the foreground of this pane, e.g. the shell, or nvim
+    /// started from it.
+    fn foreground_pid(&self) -> Option<u32> {
+        self.master
+            .process_group_leader()
+            .map(|pid| pid as u32)
+            .or_else(|| self.child.process_id())
+    }
+
+    /// The command line of the foreground process.
+    pub fn foreground_argv(&self) -> Vec<String> {
+        let Some(pid) = self.foreground_pid() else {
+            return Vec::new();
+        };
+        std::fs::read(format!("/proc/{pid}/cmdline"))
+            .map(|raw| {
+                raw.split(|b| *b == 0)
+                    .filter(|arg| !arg.is_empty())
+                    .map(|arg| String::from_utf8_lossy(arg).into_owned())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// What the agent in this pane is doing, `None` without an agent.
+    pub fn agent_state(&self) -> Option<AgentState> {
+        let argv = self.foreground_argv();
+        let since = self.last_output.lock().unwrap().elapsed();
+        let asking = agent::asks_question(self.screen().screen());
+        if !asking {
+            self.answered.set(false);
+        }
+        agent::state(&argv, self.reported, since, asking && !self.answered.get())
+    }
+
+    /// Notes input from the user or another agent: a question on the screen
+    /// counts as answered.
+    pub fn note_input(&self) {
+        if agent::asks_question(self.screen().screen()) {
+            self.answered.set(true);
+        }
+    }
+
+    /// The name to show for this pane: the agent, else the foreground program.
+    pub fn program(&self) -> Option<String> {
+        let argv = self.foreground_argv();
+        if let Some(agent) = agent::agent_name(&argv) {
+            return Some(agent.to_owned());
+        }
+        let first = argv.first()?;
+        Some(
+            first
+                .rsplit('/')
+                .next()
+                .unwrap_or(first)
+                .trim_start_matches('-')
+                .to_owned(),
+        )
     }
 
     /// The working directory of the program in the foreground of this pane,
     /// e.g. the shell, or nvim started from it. Read from `/proc`, so Linux
     /// only.
     pub fn cwd(&self) -> Option<PathBuf> {
-        let pid = self
-            .master
-            .process_group_leader()
-            .map(|pid| pid as u32)
-            .or_else(|| self.child.process_id())?;
+        let pid = self.foreground_pid()?;
         std::fs::read_link(format!("/proc/{pid}/cwd")).ok()
     }
 

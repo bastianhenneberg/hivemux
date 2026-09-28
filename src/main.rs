@@ -1,5 +1,7 @@
+mod agent;
 mod app;
 mod bindings;
+mod cli;
 mod client;
 mod clipboard;
 mod config;
@@ -23,6 +25,14 @@ Commands:
   attach        attach to the running session
   kill-server   shut down the server and every pane in it
   keys          list the key bindings
+
+For scripts and agents:
+  list [--json]                         list the panes with program and agent state
+  status <working|blocked|idle|clear>   report this pane's agent state (for hooks)
+  send [--pane N] [--no-enter] <text>   type text into a pane
+  new [--float] [--workspace N] [-- command args...]
+                                        start a command in a new pane
+  hooks                                 print the Claude Code hooks for status
   help          show this help
 
 Inside hivemux, Ctrl+B then q opens the quit menu: detach, close the pane or end the
@@ -44,6 +54,11 @@ fn main() -> Result<()> {
             Ok(())
         }
         ["server"] => server::run(),
+        ["status", ..] => cli::status(&args[1..]),
+        ["list", ..] => cli::list(&args[1..]),
+        ["send", ..] => cli::send(&args[1..]),
+        ["new", ..] => cli::new(&args[1..]),
+        ["hooks"] => cli::hooks(),
         ["help" | "-h" | "--help"] => {
             println!("{USAGE}");
             Ok(())
