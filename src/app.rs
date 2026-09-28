@@ -260,7 +260,7 @@ pub struct App {
     /// Where the layout is saved to survive a restart, see `persist`.
     state_path: Option<PathBuf>,
     /// The Omarchy theme in use when the theme was last applied.
-    followed: Option<String>,
+    followed: Option<theme::Stamp>,
     /// What was saved last, to write only when something changed.
     last_saved: String,
     last_save_at: Instant,
@@ -2380,13 +2380,13 @@ impl App {
     /// Draws with the configured theme from now on. When it follows
     /// Omarchy, remembers which Omarchy theme that was.
     fn apply_theme(&mut self) {
-        self.followed = theme::omarchy_current();
+        self.followed = theme::omarchy_stamp();
         theme::set(theme::load(&self.config.theme));
     }
 
     /// Picks up a theme switch on the desktop when following Omarchy.
     fn follow_omarchy(&mut self) {
-        if self.config.theme == theme::FOLLOW && theme::omarchy_current() != self.followed {
+        if self.config.theme == theme::FOLLOW && theme::omarchy_stamp() != self.followed {
             self.apply_theme();
         }
     }

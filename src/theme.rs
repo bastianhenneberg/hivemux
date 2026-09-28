@@ -112,6 +112,33 @@ pub fn omarchy_current() -> Option<String> {
     Some(name.trim().to_owned()).filter(|n| !n.is_empty())
 }
 
+/// What changes when Omarchy switches themes: the name and when its
+/// colours were written. The colours can land after the name, so both count.
+pub type Stamp = (Option<String>, Option<std::time::SystemTime>);
+
+/// Omarchy's current theme as a [`Stamp`], `None` without Omarchy.
+pub fn omarchy_stamp() -> Option<Stamp> {
+    let state = omarchy_state();
+    if !state.is_dir() {
+        return None;
+    }
+    let written = fs::metadata(state.join("theme/colors.toml"))
+        .and_then(|m| m.modified())
+        .ok();
+    Some((omarchy_current(), written))
+}
+
+/// The theme to start with: following Omarchy where it is installed, the
+/// built-in one elsewhere.
+pub fn default_name() -> String {
+    if omarchy_state().is_dir() {
+        FOLLOW
+    } else {
+        BUILTIN
+    }
+    .to_owned()
+}
+
 /// Every theme to choose from: the built-in one, following Omarchy, then
 /// the installed Omarchy themes by name.
 pub fn available() -> Vec<String> {

@@ -161,7 +161,7 @@ impl Default for Sidebar {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            theme: theme::BUILTIN.to_owned(),
+            theme: theme::default_name(),
             which_key: WhichKey::default(),
             bars: Bars::default(),
             sidebar: Sidebar::default(),
