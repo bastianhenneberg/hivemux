@@ -2,7 +2,7 @@
 //! connections all come in over one channel, and after each batch of events
 //! the screen is rendered for the attached client.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::{self, Write};
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
@@ -23,7 +23,7 @@ use ratatui::{Frame, Terminal, TerminalOptions, Viewport};
 
 use crate::agent::{self, AgentState};
 use crate::bindings::{self, Command, Menu};
-use crate::config::{Bars, Config, Placement, SETTINGS};
+use crate::config::{self, Bars, Config, Placement, SETTINGS, Side};
 use crate::keys;
 use crate::layout::{Axis, MIN_PANE_SIZE, PaneId};
 use crate::menu;
@@ -31,6 +31,7 @@ use crate::pane::{Pane, Spawn};
 use crate::persist::{self, Saved, SavedPane};
 use crate::protocol::{ClientMsg, Reply, Request, ServerMsg};
 use crate::render::ScreenView;
+use crate::sidebar::{self, state_style};
 use crate::theme;
 use crate::workspace::Workspace;
 use crate::{clipboard, mouse};
@@ -200,6 +201,11 @@ pub struct App {
     socket: PathBuf,
     /// The last agent state seen per pane, and since when it holds.
     agents: HashMap<PaneId, (AgentState, Instant)>,
+    /// Agents that finished while the user was not looking, shown as done
+    /// until their pane is focused.
+    unseen: HashSet<PaneId>,
+    /// Where the sidebar is drawn, if it is shown.
+    sidebar: Option<Rect>,
     /// Where the layout is saved to survive a restart, see `persist`.
     state_path: Option<PathBuf>,
     /// The Omarchy theme in use when the theme was last applied.
@@ -246,6 +252,8 @@ impl App {
             next_client_id: 0,
             socket,
             agents: HashMap::new(),
+            unseen: HashSet::new(),
+            sidebar: None,
             state_path: persist::path().ok(),
             followed: None,
             last_saved: String::new(),
@@ -408,7 +416,8 @@ impl App {
 
     fn event_loop(&mut self, rx: &Receiver<AppEvent>) {
         while !self.quit {
-            self.body = screen_layout(self.screen, &self.config.bars).body;
+            let body = screen_layout(self.screen, &self.config.bars).body;
+            (self.body, self.sidebar) = split_sidebar(body, &self.config.sidebar);
             self.sync_sizes();
             self.update_agents();
             self.follow_omarchy();
@@ -623,7 +632,7 @@ impl App {
                     "floating": ws.is_floating(id),
                     "focused": n == self.workspace && id == self.ws.focus,
                     "program": pane.program(),
-                    "state": pane.agent_state().map(AgentState::name),
+                    "state": self.shown_state(id).map(AgentState::name),
                     "cwd": pane.cwd(),
                     "session": pane.session,
                 }));
@@ -718,6 +727,12 @@ impl App {
         for (&id, &(state, _)) in &seen {
             let was = self.agents.get(&id).map(|(s, _)| *s);
             let in_view = self.ws.contains(id) && (self.ws.focus == id || self.client.is_none());
+            if state == AgentState::Idle
+                && matches!(was, Some(AgentState::Working | AgentState::Blocked))
+                && !in_view
+            {
+                self.unseen.insert(id);
+            }
             if state == AgentState::Blocked && was != Some(AgentState::Blocked) && !in_view {
                 self.flash = Some(format!("pane {id} needs you · ^B a"));
                 if let Some(client) = &mut self.client {
@@ -725,7 +740,110 @@ impl App {
                 }
             }
         }
+        self.unseen.retain(|id| seen.contains_key(id));
+        if self.client.is_some() {
+            self.unseen.remove(&self.ws.focus);
+        }
         self.agents = seen;
+    }
+
+    /// The state to show for pane `id`: done while an idle agent has not
+    /// been looked at.
+    fn shown_state(&self, id: PaneId) -> Option<AgentState> {
+        let (state, _) = self.agents.get(&id)?;
+        if *state == AgentState::Idle && self.unseen.contains(&id) {
+            Some(AgentState::Done)
+        } else {
+            Some(*state)
+        }
+    }
+
+    /// The number of the workspace that contains pane `id`.
+    fn workspace_of(&self, id: PaneId) -> Option<u8> {
+        if self.ws.contains(id) {
+            return Some(self.workspace);
+        }
+        self.hidden
+            .iter()
+            .find_map(|(n, ws)| ws.contains(id).then_some(*n))
+    }
+
+    /// Shows pane `id`, switching to its workspace if needed.
+    fn reveal(&mut self, id: PaneId) {
+        if !self.ws.contains(id) {
+            let Some(n) = self.workspace_of(id) else {
+                return;
+            };
+            self.show(n);
+        }
+        self.ws.focus(id);
+    }
+
+    /// What the sidebar shows.
+    fn sidebar_data(&self) -> sidebar::Data {
+        let dir_name = |id: PaneId| {
+            self.panes
+                .get(&id)
+                .and_then(Pane::cwd)
+                .and_then(|cwd| cwd.file_name().map(|n| n.to_string_lossy().into_owned()))
+                .unwrap_or_default()
+        };
+        let workspaces = self
+            .workspaces()
+            .into_iter()
+            .map(|n| {
+                let ws = if n == self.workspace {
+                    &self.ws
+                } else {
+                    &self.hidden[&n]
+                };
+                let states: Vec<AgentState> = ws
+                    .panes()
+                    .iter()
+                    .filter_map(|id| self.shown_state(*id))
+                    .collect();
+                sidebar::WorkspaceRow {
+                    number: n,
+                    name: dir_name(ws.focus),
+                    active: n == self.workspace,
+                    state: states.iter().copied().min_by_key(|s| sidebar::urgency(*s)),
+                    agents: states.len(),
+                }
+            })
+            .collect();
+
+        let now = Instant::now();
+        let mut agents: Vec<sidebar::AgentRow> = self
+            .agents
+            .iter()
+            .filter_map(|(&id, &(_, since))| {
+                let pane = self.panes.get(&id)?;
+                Some(sidebar::AgentRow {
+                    pane: id,
+                    program: pane.program().unwrap_or_default(),
+                    workspace: self.workspace_of(id)?,
+                    dir: dir_name(id),
+                    state: self.shown_state(id)?,
+                    since: now - since,
+                    focused: id == self.ws.focus,
+                })
+            })
+            .collect();
+        // Those that need the user first, and among them the longest waiting.
+        agents.sort_by_key(|a| {
+            (
+                sidebar::urgency(a.state),
+                std::cmp::Reverse(a.since),
+                a.pane,
+            )
+        });
+
+        let branch = self.focused_cwd().and_then(|cwd| sidebar::git_branch(&cwd));
+        sidebar::Data {
+            workspaces,
+            agents,
+            branch,
+        }
     }
 
     /// Focuses the agent that has been waiting longest, in any workspace.
@@ -746,17 +864,7 @@ impl App {
             self.flash = Some("no agent is waiting".into());
             return;
         };
-        if !self.ws.contains(target) {
-            let Some(n) = self
-                .hidden
-                .iter()
-                .find_map(|(n, ws)| ws.contains(target).then_some(*n))
-            else {
-                return;
-            };
-            self.show(n);
-        }
-        self.ws.focus(target);
+        self.reveal(target);
     }
 
     /// Adopts the client's new screen size. The terminal is rebuilt rather
@@ -861,6 +969,12 @@ impl App {
             Command::Back => self.mode = Mode::Prefix(Menu::Root),
             Command::CopyMode => self.enter_copy(),
             Command::JumpToWaiting => self.jump_to_waiting(),
+            Command::ToggleSidebar => {
+                self.config.sidebar.enabled = !self.config.sidebar.enabled;
+                if let Err(e) = self.config.save() {
+                    self.config_note = Some(format!("not saved: {e:#}"));
+                }
+            }
             Command::ScrollBack => {
                 self.enter_copy();
                 let page = self.focused_inner().map_or(1, |r| r.height as isize);
@@ -1140,6 +1254,14 @@ impl App {
                 self.flash = None;
                 if let Some(n) = self.tab_at(pos) {
                     self.switch_workspace(n);
+                    return Ok(());
+                }
+                if let Some(area) = self.sidebar.filter(|area| area.contains(pos)) {
+                    match sidebar::target_at(&self.sidebar_data(), area, pos) {
+                        Some(sidebar::Target::Workspace(n)) => self.switch_workspace(n),
+                        Some(sidebar::Target::Pane(id)) => self.reveal(id),
+                        None => {}
+                    }
                     return Ok(());
                 }
                 let Some((id, rect)) = self.ws.pane_at(pos, self.body) else {
@@ -1577,7 +1699,7 @@ impl App {
 
     fn draw(&self, frame: &mut Frame) {
         let screen = screen_layout(frame.area(), &self.config.bars);
-        let body = screen.body;
+        let (body, sidebar_area) = split_sidebar(screen.body, &self.config.sidebar);
 
         for (id, rect) in self.ws.rects(body) {
             let Some(pane) = self.panes.get(&id) else {
@@ -1585,7 +1707,7 @@ impl App {
             };
             let focused = id == self.ws.focus;
             let floating = self.ws.is_floating(id);
-            let state = self.agents.get(&id).map(|(state, _)| *state);
+            let state = self.shown_state(id);
             let border = match (focused, state) {
                 (_, Some(AgentState::Blocked)) => Style::new().fg(theme::current().danger),
                 (true, _) => Style::new().fg(theme::current().accent),
@@ -1645,6 +1767,9 @@ impl App {
             }
         }
 
+        if let Some(area) = sidebar_area {
+            sidebar::draw(frame, area, &self.sidebar_data());
+        }
         if let Some(area) = screen.top {
             self.draw_bar(frame, area, Placement::Top);
         }
@@ -1917,8 +2042,17 @@ impl App {
                 }
             }
             Mode::Normal => {
-                for state in [AgentState::Blocked, AgentState::Working, AgentState::Idle] {
-                    let count = self.agents.values().filter(|(s, _)| *s == state).count();
+                for state in [
+                    AgentState::Blocked,
+                    AgentState::Done,
+                    AgentState::Working,
+                    AgentState::Idle,
+                ] {
+                    let count = self
+                        .agents
+                        .keys()
+                        .filter(|id| self.shown_state(**id) == Some(state))
+                        .count();
                     if count > 0 {
                         spans.push(Span::styled(
                             format!("{} {count} {}", state.symbol(), state.name()),
@@ -1989,13 +2123,34 @@ fn screen_layout(screen: Rect, bars: &Bars) -> ScreenLayout {
 
 const BADGE: &str = " ⬢ hivemux ";
 
-fn state_style(state: AgentState) -> Style {
-    match state {
-        AgentState::Working => Style::new().fg(theme::current().warning),
-        AgentState::Blocked => Style::new()
-            .fg(theme::current().danger)
-            .add_modifier(Modifier::BOLD),
-        AgentState::Idle => Style::new().fg(theme::current().success),
+/// The panes' area and the sidebar's, if it is on and there is room for it
+/// next to panes at least as wide.
+fn split_sidebar(body: Rect, config: &config::Sidebar) -> (Rect, Option<Rect>) {
+    let width = sidebar::WIDTH;
+    if !config.enabled || body.width < 2 * width {
+        return (body, None);
+    }
+    let rest = body.width - width;
+    match config.side {
+        Side::Left => (
+            Rect {
+                x: body.x + width,
+                width: rest,
+                ..body
+            },
+            Some(Rect { width, ..body }),
+        ),
+        Side::Right => (
+            Rect {
+                width: rest,
+                ..body
+            },
+            Some(Rect {
+                x: body.x + rest,
+                width,
+                ..body
+            }),
+        ),
     }
 }
 
@@ -2064,6 +2219,24 @@ mod tests {
         assert_eq!(layout.top, Some(Rect::new(0, 0, 80, 1)));
         assert_eq!(layout.body, Rect::new(0, 1, 80, 22));
         assert_eq!(layout.bottom, Some(Rect::new(0, 23, 80, 1)));
+    }
+
+    #[test]
+    fn sidebar_takes_its_side_when_there_is_room() {
+        let body = Rect::new(0, 1, 120, 30);
+        let mut config = config::Sidebar::default();
+        let (panes, side) = split_sidebar(body, &config);
+        assert_eq!(panes, Rect::new(0, 1, 90, 30));
+        assert_eq!(side, Some(Rect::new(90, 1, 30, 30)));
+
+        config.side = Side::Left;
+        let (panes, side) = split_sidebar(body, &config);
+        assert_eq!(panes, Rect::new(30, 1, 90, 30));
+        assert_eq!(side, Some(Rect::new(0, 1, 30, 30)));
+
+        assert_eq!(split_sidebar(Rect::new(0, 0, 50, 20), &config).1, None);
+        config.enabled = false;
+        assert_eq!(split_sidebar(body, &config), (body, None));
     }
 
     #[test]

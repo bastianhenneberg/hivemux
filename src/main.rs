@@ -14,6 +14,7 @@ mod persist;
 mod protocol;
 mod render;
 mod server;
+mod sidebar;
 mod theme;
 mod workspace;
 

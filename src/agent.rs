@@ -18,6 +18,9 @@ pub enum AgentState {
     Blocked,
     /// Done with its turn, ready for the next prompt.
     Idle,
+    /// Finished while the user was elsewhere and not looked at since. Only
+    /// shown, never reported: it is `Idle` the user has not seen yet.
+    Done,
 }
 
 impl AgentState {
@@ -26,6 +29,7 @@ impl AgentState {
             AgentState::Working => "●",
             AgentState::Blocked => "◆",
             AgentState::Idle => "✓",
+            AgentState::Done => "✦",
         }
     }
 
@@ -34,6 +38,7 @@ impl AgentState {
             AgentState::Working => "working",
             AgentState::Blocked => "blocked",
             AgentState::Idle => "idle",
+            AgentState::Done => "done",
         }
     }
 }

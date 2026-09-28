@@ -29,6 +29,8 @@ pub enum Command {
     NextWorkspace,
     PrevWorkspace,
     NextFloat,
+    /// Show or hide the sidebar.
+    ToggleSidebar,
     /// Focus the agent waiting longest for the user.
     JumpToWaiting,
     /// Scroll back and select text with the keyboard.
@@ -314,6 +316,12 @@ pub const BINDINGS: &[Binding] = &[
         description: "quit hivemux",
         group: Group::Session,
         keys: &[(Key::plain(Char('Q')), C::Quit)],
+    },
+    Binding {
+        label: "s",
+        description: "sidebar",
+        group: Group::Session,
+        keys: &[(Key::plain(Char('s')), C::ToggleSidebar)],
     },
     Binding {
         label: ",",

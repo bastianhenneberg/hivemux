@@ -61,6 +61,7 @@ a time, attaching from a second terminal detaches the first.
 | `Ctrl+B` `q` | Quit menu: detach, close the pane or end the session |
 | `Ctrl+B` `d` | Detach, the shells keep running |
 | `Ctrl+B` `Q` | Quit: end the session and every shell in it (asks first) |
+| `Ctrl+B` `s` | Show or hide the sidebar |
 | `Ctrl+B` `,` | Settings |
 | `Ctrl+B` `?` | Show all keys |
 | `Ctrl+B` `Ctrl+B` | Send `Ctrl+B` to the shell |
@@ -70,10 +71,18 @@ submenus, `⌫` goes back.
 Focus, move and resize repeat: for 600 ms after one of them, arrow keys work without the prefix.
 A pane closes when its shell exits, hivemux exits with the last pane.
 
+## Sidebar
+
+A sidebar on the right, like the rail in TUIOS, lists every workspace with its project (the
+focused pane's directory) and what its agents are doing, every agent across all workspaces with
+its workspace, directory and how long it has been in its state, and the git branch of the
+focused pane. Agents waiting for you come first. Click a row to go there. `Ctrl+B s` shows or
+hides it, the settings put it left or right.
+
 ## Agents
 
 Every pane running a coding agent shows what it is doing: `● working`, `◆ blocked` (it waits
-for you) or `✓ idle`. A workspace tab turns red when an agent there waits, the bell rings, and
+for you), `✦ done` (finished while you were elsewhere) or `✓ idle`. A workspace tab turns red when an agent there waits, the bell rings, and
 `Ctrl+B a` takes you to it.
 
 hivemux recognises claude, codex, opencode, aider, gemini, crush, goose, amp, cursor-agent, qwen
@@ -131,6 +140,10 @@ theme = "omarchy"   # "hivemux", "omarchy" to follow the desktop, or an Omarchy 
 [which_key]
 enabled = true      # show the key menu after Ctrl+B
 position = "left"   # "left" or "right" bottom corner
+
+[sidebar]
+enabled = true
+side = "right"      # "left" or "right"
 
 [bars]
 control = "bottom"  # hivemux badge, mode and hints: "top" or "bottom"

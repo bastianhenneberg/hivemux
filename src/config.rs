@@ -103,6 +103,24 @@ pub struct Config {
     pub theme: String,
     pub which_key: WhichKey,
     pub bars: Bars,
+    pub sidebar: Sidebar,
+}
+
+/// The sidebar with workspaces and agents, like the rail in TUIOS.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Sidebar {
+    pub enabled: bool,
+    pub side: Side,
+}
+
+impl Default for Sidebar {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            side: Side::Right,
+        }
+    }
 }
 
 impl Default for Config {
@@ -111,6 +129,7 @@ impl Default for Config {
             theme: theme::BUILTIN.to_owned(),
             which_key: WhichKey::default(),
             bars: Bars::default(),
+            sidebar: Sidebar::default(),
         }
     }
 }
@@ -203,6 +222,27 @@ pub const SETTINGS: &[Setting] = &[
             name => name.to_owned(),
         },
         step: |c, forward| c.theme = step_in(&theme::available(), &c.theme, forward),
+    },
+    Setting {
+        name: "Sidebar",
+        value: |c| if c.sidebar.enabled { "on" } else { "off" }.to_owned(),
+        step: |c, _| c.sidebar.enabled = !c.sidebar.enabled,
+    },
+    Setting {
+        name: "Sidebar side",
+        value: |c| {
+            match c.sidebar.side {
+                Side::Left => "left",
+                Side::Right => "right",
+            }
+            .to_owned()
+        },
+        step: |c, _| {
+            c.sidebar.side = match c.sidebar.side {
+                Side::Left => Side::Right,
+                Side::Right => Side::Left,
+            }
+        },
     },
     Setting {
         name: "Which-key menu",
