@@ -98,6 +98,12 @@ focused pane with its changed files. Agents waiting for you come first. Enter or
 changed file shows its diff in a floating pane, `o` in the sidebar opens it in `$EDITOR`. Click a row to go there. `Ctrl+B b` shows or
 hides it (as in TUIOS), `Ctrl+B e` moves the keyboard into it, the settings put it left or right.
 
+Below that is the file tree of the focused pane's project (its repository, or else its
+directory), as in TUIOS: click a folder or press `Enter` on it to open it, `h` closes it again,
+a file opens in `$EDITOR` in a floating pane. Changed files are coloured, `f` in the sidebar
+jumps to the tree, the mouse wheel scrolls the sidebar. `Sidebar files` in the settings turns it
+off.
+
 ## Agents
 
 Every pane running a coding agent shows what it is doing: `● working`, `◆ blocked` (it waits

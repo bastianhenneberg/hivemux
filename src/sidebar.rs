@@ -1,6 +1,7 @@
 //! The sidebar, like the rail in TUIOS and herdr's sidebar: every workspace
 //! with what its agents are doing, every agent across all workspaces, and
-//! the git branch of the focused pane. Rows are clickable.
+//! the git branch of the focused pane and the files of its project. Rows are
+//! clickable.
 
 use std::fs;
 use std::path::Path;
@@ -13,6 +14,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Clear, Paragraph};
 
 use crate::agent::AgentState;
+use crate::filetree::Entry;
 use crate::layout::PaneId;
 use crate::theme;
 
@@ -47,6 +49,8 @@ pub struct Data {
     /// Changed files in the focused pane's repository, as `git status`
     /// shows them: two status letters and the path from the repository root.
     pub changes: Vec<Change>,
+    /// The file tree: the root's name and what is shown of it.
+    pub files: Option<(String, Vec<Entry>)>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -65,6 +69,8 @@ pub enum Target {
     Pane(PaneId),
     /// The changed file at this index in `Data::changes`.
     Change(usize),
+    /// The file tree's entry at this index.
+    File(usize),
 }
 
 /// The order agents are listed in: those that need the user first.
@@ -188,7 +194,69 @@ pub fn lines(data: &Data, width: u16) -> Vec<(Line<'static>, Option<Target>)> {
             ));
         }
     }
+
+    if let Some((root, entries)) = &data.files {
+        out.push((Line::default(), None));
+        out.push((
+            Line::from(vec![
+                Span::styled("Files ", heading(t.cyan)),
+                Span::styled(fit(root, width.saturating_sub(6)), dim),
+            ]),
+            None,
+        ));
+        if entries.is_empty() {
+            out.push((Line::styled("  empty", dim), None));
+        }
+        for (i, entry) in entries.iter().enumerate() {
+            let indent = "  ".repeat(usize::from(entry.depth));
+            let (marker, name, style) = if entry.dir {
+                let marker = if entry.open { "▾ " } else { "▸ " };
+                (marker, format!("{}/", entry.name), Style::new().fg(t.blue))
+            } else if entry.changed {
+                ("  ", entry.name.clone(), Style::new().fg(t.warning))
+            } else {
+                ("  ", entry.name.clone(), Style::new())
+            };
+            let room = width.saturating_sub(indent.chars().count() + 2);
+            out.push((
+                Line::from(vec![
+                    Span::raw(indent),
+                    Span::styled(marker, dim),
+                    Span::styled(fit(&name, room), style),
+                ]),
+                Some(Target::File(i)),
+            ));
+        }
+    }
     out
+}
+
+/// How far to scroll a sidebar of `height` rows so the `selected` clickable
+/// row shows, starting from `scroll`.
+pub fn scroll_to_show(data: &Data, height: u16, selected: usize, scroll: usize) -> usize {
+    let height = usize::from(height.max(1));
+    let Some(row) = lines(data, WIDTH)
+        .iter()
+        .enumerate()
+        .filter(|(_, (_, target))| target.is_some())
+        .nth(selected)
+        .map(|(row, _)| row)
+    else {
+        return scroll;
+    };
+    if row < scroll {
+        // One more, so the heading of the first section shows.
+        row.saturating_sub(1)
+    } else if row >= scroll + height {
+        row + 1 - height
+    } else {
+        scroll
+    }
+}
+
+/// The furthest the sidebar can scroll with `height` rows.
+pub fn max_scroll(data: &Data, height: u16) -> usize {
+    lines(data, WIDTH).len().saturating_sub(usize::from(height))
 }
 
 /// `text` cut to `room` characters keeping its end, for paths.
@@ -223,7 +291,7 @@ pub fn parse_changes(porcelain: &str) -> Vec<Change> {
 
 /// Draws the sidebar. `selected` is the index of the highlighted row among
 /// the clickable ones, when the sidebar has the keyboard.
-pub fn draw(frame: &mut Frame, area: Rect, data: &Data, selected: Option<usize>) {
+pub fn draw(frame: &mut Frame, area: Rect, data: &Data, selected: Option<usize>, scroll: usize) {
     let border = match selected {
         Some(_) => theme::current().accent,
         None => theme::current().subtle,
@@ -256,7 +324,8 @@ pub fn draw(frame: &mut Frame, area: Rect, data: &Data, selected: Option<usize>)
         })
         .collect();
     frame.render_widget(Clear, area);
-    frame.render_widget(Paragraph::new(rows).block(block), area);
+    let scroll = u16::try_from(scroll).unwrap_or(u16::MAX);
+    frame.render_widget(Paragraph::new(rows).block(block).scroll((scroll, 0)), area);
 }
 
 /// The clickable rows' targets, top to bottom.
@@ -268,12 +337,12 @@ pub fn targets(data: &Data) -> Vec<Target> {
 }
 
 /// What the row at `pos` does when clicked, for a sidebar drawn at `area`.
-pub fn target_at(data: &Data, area: Rect, pos: Position) -> Option<Target> {
+pub fn target_at(data: &Data, area: Rect, pos: Position, scroll: usize) -> Option<Target> {
     let inner = Block::bordered().inner(area);
     if !inner.contains(pos) {
         return None;
     }
-    let row = usize::from(pos.y - inner.y);
+    let row = usize::from(pos.y - inner.y) + scroll;
     lines(data, inner.width)
         .get(row)
         .and_then(|(_, target)| *target)
@@ -368,6 +437,7 @@ mod tests {
                 status: " M".into(),
                 path: "src/app.rs".into(),
             }],
+            files: None,
         }
     }
 
@@ -406,11 +476,16 @@ mod tests {
         let data = data();
         // Row 0 is the heading, row 1 workspace 1, inside the border.
         assert_eq!(
-            target_at(&data, area, Position::new(72, 2)),
+            target_at(&data, area, Position::new(72, 2), 0),
             Some(Target::Workspace(1))
         );
-        assert_eq!(target_at(&data, area, Position::new(72, 1)), None);
-        assert_eq!(target_at(&data, area, Position::new(70, 2)), None);
+        assert_eq!(target_at(&data, area, Position::new(72, 1), 0), None);
+        assert_eq!(target_at(&data, area, Position::new(70, 2), 0), None);
+        // Scrolled down one row, the same place is workspace 2.
+        assert_eq!(
+            target_at(&data, area, Position::new(72, 2), 1),
+            Some(Target::Workspace(2))
+        );
     }
 
     #[test]
@@ -447,5 +522,36 @@ mod tests {
         let here = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
         assert!(git_branch(&here).is_some());
         assert_eq!(git_branch(Path::new("/")), None);
+    }
+
+    #[test]
+    fn file_tree_rows_indent_and_scroll_into_view() {
+        let entry = |name: &str, depth, dir, open| Entry {
+            path: name.into(),
+            name: name.into(),
+            depth,
+            dir,
+            open,
+            changed: false,
+        };
+        let mut data = data();
+        data.files = Some((
+            "hivemux".into(),
+            vec![
+                entry("src", 0, true, true),
+                entry("app.rs", 1, false, false),
+            ],
+        ));
+        let rows = lines(&data, 28);
+        let texts: Vec<String> = rows.iter().map(|(l, _)| text(l)).collect();
+        assert!(texts.iter().any(|t| t == "Files hivemux"));
+        assert!(texts.iter().any(|t| t == "▾ src/"));
+        assert_eq!(texts.last().unwrap(), "    app.rs");
+        assert_eq!(rows.last().unwrap().1, Some(Target::File(1)));
+        // The last clickable row, in a sidebar of 5 rows, needs scrolling.
+        let last = targets(&data).len() - 1;
+        let scroll = scroll_to_show(&data, 5, last, 0);
+        assert_eq!(scroll, rows.len() - 5);
+        assert_eq!(scroll_to_show(&data, 5, 0, scroll), 0);
     }
 }

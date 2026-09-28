@@ -147,6 +147,8 @@ pub enum Notifications {
 pub struct Sidebar {
     pub enabled: bool,
     pub side: Side,
+    /// The file tree of the focused pane's project.
+    pub files: bool,
 }
 
 impl Default for Sidebar {
@@ -154,6 +156,7 @@ impl Default for Sidebar {
         Self {
             enabled: true,
             side: Side::Right,
+            files: true,
         }
     }
 }
@@ -270,6 +273,11 @@ pub const SETTINGS: &[Setting] = &[
         name: "Sidebar",
         value: |c| if c.sidebar.enabled { "on" } else { "off" }.to_owned(),
         step: |c, _| c.sidebar.enabled = !c.sidebar.enabled,
+    },
+    Setting {
+        name: "Sidebar files",
+        value: |c| if c.sidebar.files { "on" } else { "off" }.to_owned(),
+        step: |c, _| c.sidebar.files = !c.sidebar.files,
     },
     Setting {
         name: "Sidebar side",

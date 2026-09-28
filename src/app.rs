@@ -25,6 +25,7 @@ use ratatui::{Frame, Terminal, TerminalOptions, Viewport};
 use crate::agent::{self, AgentState};
 use crate::bindings::{self, Command, Menu};
 use crate::config::{self, Bars, Config, Notifications, Placement, SETTINGS, Side};
+use crate::filetree::FileTree;
 use crate::keys;
 use crate::layout::{Axis, MIN_PANE_SIZE, PaneId};
 use crate::menu;
@@ -260,6 +261,10 @@ pub struct App {
     upgrade_to: Option<PathBuf>,
     /// The focused pane's repository, for the sidebar.
     git: Option<GitState>,
+    /// The focused pane's project, for the sidebar.
+    files: FileTree,
+    /// How many rows the sidebar is scrolled down.
+    sidebar_scroll: usize,
     /// The focused pane as last seen, and the one before it, for `Ctrl+B ;`.
     current_focus: Option<PaneId>,
     last_focus: Option<PaneId>,
@@ -337,6 +342,8 @@ impl App {
             listener,
             upgrade_to: None,
             git: None,
+            files: FileTree::default(),
+            sidebar_scroll: 0,
             current_focus: None,
             last_focus: None,
             state_path: persist::path().ok(),
@@ -618,6 +625,8 @@ impl App {
             self.track_focus();
             self.sync_graphics();
             self.refresh_git();
+            self.refresh_files();
+            self.scroll_sidebar_to_selection();
             self.follow_omarchy();
             self.save_state();
             self.render();
@@ -1146,7 +1155,70 @@ impl App {
                 .as_ref()
                 .map(|g| g.changes.clone())
                 .unwrap_or_default(),
+            files: self.file_rows(),
         }
+    }
+
+    /// The file tree for the sidebar, with changed files marked.
+    fn file_rows(&self) -> Option<(String, Vec<crate::filetree::Entry>)> {
+        if !self.config.sidebar.files || self.files.root.as_os_str().is_empty() {
+            return None;
+        }
+        let changed: HashSet<PathBuf> = self
+            .git
+            .as_ref()
+            .map(|g| g.changes.iter().map(|c| g.root.join(&c.path)).collect())
+            .unwrap_or_default();
+        let mut entries = self.files.entries.clone();
+        for entry in &mut entries {
+            entry.changed = !entry.dir && changed.contains(&entry.path);
+        }
+        let root = self.files.root.file_name().map_or_else(
+            || tilde(&self.files.root),
+            |n| n.to_string_lossy().into_owned(),
+        );
+        Some((root, entries))
+    }
+
+    /// Keeps the file tree on the focused pane's project: its repository,
+    /// or else its directory.
+    fn refresh_files(&mut self) {
+        if self.sidebar.is_none() || !self.config.sidebar.files {
+            return;
+        }
+        let root = match (&self.git, self.focused_cwd()) {
+            (Some(git), Some(cwd)) if cwd.starts_with(&git.root) => git.root.clone(),
+            (_, Some(cwd)) => cwd,
+            (_, None) => return,
+        };
+        self.files.refresh(&root);
+    }
+
+    /// Opens or closes a folder of the file tree, or opens a file in
+    /// `$EDITOR`. True for a folder, where the sidebar keeps the keyboard.
+    fn open_file(&mut self, i: usize) -> bool {
+        if self.files.toggle(i) {
+            return true;
+        }
+        let Some(entry) = self.files.entries.get(i) else {
+            return false;
+        };
+        let path = entry.path.to_string_lossy().into_owned();
+        let dir = entry.path.parent().map(PathBuf::from);
+        let name = format!("edit {}", entry.name);
+        self.float_script(&name, "\"${EDITOR:-nvim}\" \"$1\"", &[&path], dir);
+        false
+    }
+
+    /// Keeps the row the sidebar's keyboard is on in view.
+    fn scroll_sidebar_to_selection(&mut self) {
+        let (Mode::Sidebar(selected), Some(area)) = (self.mode, self.sidebar) else {
+            return;
+        };
+        let height = area.height.saturating_sub(2);
+        let data = self.sidebar_data();
+        self.sidebar_scroll = sidebar::scroll_to_show(&data, height, selected, self.sidebar_scroll)
+            .min(sidebar::max_scroll(&data, height));
     }
 
     /// Focuses the agent that has been waiting longest, in any workspace.
@@ -1717,10 +1789,14 @@ impl App {
                     return Ok(());
                 }
                 if let Some(area) = self.sidebar.filter(|area| area.contains(pos)) {
-                    match sidebar::target_at(&self.sidebar_data(), area, pos) {
+                    let data = self.sidebar_data();
+                    match sidebar::target_at(&data, area, pos, self.sidebar_scroll) {
                         Some(sidebar::Target::Workspace(n)) => self.switch_workspace(n),
                         Some(sidebar::Target::Pane(id)) => self.reveal(id),
                         Some(sidebar::Target::Change(i)) => self.open_change(i, false),
+                        Some(sidebar::Target::File(i)) => {
+                            self.open_file(i);
+                        }
                         None => {}
                     }
                     return Ok(());
@@ -1840,6 +1916,15 @@ impl App {
                 None => self.forward_to_focused(event)?,
             },
             MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
+                if let Some(area) = self.sidebar.filter(|area| area.contains(pos)) {
+                    let max = sidebar::max_scroll(&self.sidebar_data(), area.height - 2);
+                    self.sidebar_scroll = if event.kind == MouseEventKind::ScrollUp {
+                        self.sidebar_scroll.saturating_sub(3)
+                    } else {
+                        (self.sidebar_scroll + 3).min(max)
+                    };
+                    return Ok(());
+                }
                 let Some((id, rect)) = self.pane_at(pos) else {
                     return Ok(());
                 };
@@ -2237,7 +2322,9 @@ impl App {
     }
 
     /// The sidebar with the keyboard: j/k move, Enter goes there, r names
-    /// the row's workspace or pane, x closes the row's pane, Esc leaves.
+    /// the row's workspace or pane, x closes the row's pane, Esc leaves. In
+    /// the file tree Enter opens a folder or a file, h closes the folder, f
+    /// jumps there.
     fn sidebar_key(&mut self, key: KeyEvent, selected: usize) {
         let targets = sidebar::targets(&self.sidebar_data());
         if targets.is_empty() {
@@ -2262,6 +2349,30 @@ impl App {
                     sidebar::Target::Workspace(n) => self.switch_workspace(n),
                     sidebar::Target::Pane(id) => self.reveal(id),
                     sidebar::Target::Change(i) => self.open_change(i, false),
+                    sidebar::Target::File(i) => {
+                        if self.open_file(i) {
+                            self.mode = Mode::Sidebar(selected);
+                        }
+                    }
+                }
+            }
+            KeyCode::Char('h') | KeyCode::Left => {
+                if let sidebar::Target::File(i) = target
+                    && let Some(to) = self.files.collapse(i)
+                {
+                    let row = targets
+                        .iter()
+                        .position(|t| *t == sidebar::Target::File(to))
+                        .unwrap_or(selected);
+                    self.mode = Mode::Sidebar(row);
+                }
+            }
+            KeyCode::Char('f') => {
+                if let Some(row) = targets
+                    .iter()
+                    .position(|t| matches!(t, sidebar::Target::File(_)))
+                {
+                    self.mode = Mode::Sidebar(row);
                 }
             }
             KeyCode::Char('o') => {
@@ -2273,7 +2384,7 @@ impl App {
             KeyCode::Char('r') => match target {
                 sidebar::Target::Workspace(n) => self.start_prompt(RenameTarget::Workspace(n)),
                 sidebar::Target::Pane(id) => self.start_prompt(RenameTarget::Pane(id)),
-                sidebar::Target::Change(_) => {}
+                sidebar::Target::Change(_) | sidebar::Target::File(_) => {}
             },
             KeyCode::Char('x') => {
                 if let sidebar::Target::Pane(id) = target {
@@ -2941,7 +3052,13 @@ impl App {
                 Mode::Sidebar(i) => Some(i),
                 _ => None,
             };
-            sidebar::draw(frame, area, &self.sidebar_data(), selected);
+            sidebar::draw(
+                frame,
+                area,
+                &self.sidebar_data(),
+                selected,
+                self.sidebar_scroll,
+            );
         }
         if let Some(area) = screen.top {
             self.draw_bar(frame, area, Placement::Top);
@@ -3280,7 +3397,7 @@ impl App {
             Mode::Sidebar(_) => (
                 "SIDEBAR",
                 t.blue,
-                "j k move · Enter go/diff · o edit file · r name · x close · Esc back",
+                "j k move · Enter go/open · h fold · f files · o edit · r name · x close · Esc back",
             ),
             Mode::Prompt if searching => ("SEARCH", t.orange, "Enter find · Esc cancel"),
             Mode::Prompt => ("NAME", t.orange, "Enter save · Esc cancel"),
