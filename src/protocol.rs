@@ -41,6 +41,9 @@ pub enum Request {
     Status {
         pane: PaneId,
         state: Option<AgentState>,
+        /// The agent's own session id, to resume it after a restart.
+        #[serde(default)]
+        session: Option<String>,
     },
     /// All panes.
     List,
@@ -196,6 +199,7 @@ mod tests {
             ClientMsg::Request(Request::Status {
                 pane: 3,
                 state: Some(AgentState::Blocked),
+                session: Some("abc".into()),
             }),
             ClientMsg::Request(Request::New {
                 command: vec!["claude".into(), "--resume".into()],

@@ -1,6 +1,8 @@
 //! Commands for scripts and agents: `hivemux status`, `list`, `send`, `new`
 //! and `hooks`. They talk to the running server over its socket.
 
+use std::io::Read;
+
 use anyhow::{Context, Result, bail};
 
 use crate::agent::AgentState;
@@ -28,8 +30,46 @@ pub fn status(args: &[String]) -> Result<()> {
     let Some(pane) = pane else {
         return Ok(());
     };
-    let _ = client::request(Request::Status { pane, state });
+    // Agent hooks pass what happened as JSON on stdin.
+    let hook = read_hook_input();
+    if hook.as_ref().is_some_and(|hook| ignore_hook(hook, state)) {
+        return Ok(());
+    }
+    let session = hook
+        .as_ref()
+        .and_then(|hook| hook["session_id"].as_str())
+        .map(str::to_owned);
+    let _ = client::request(Request::Status {
+        pane,
+        state,
+        session,
+    });
     Ok(())
+}
+
+/// The JSON a hook got on stdin, `None` when stdin is a terminal or holds
+/// no JSON.
+fn read_hook_input() -> Option<serde_json::Value> {
+    // SAFETY: isatty only looks at the file descriptor.
+    if unsafe { libc::isatty(0) } == 1 {
+        return None;
+    }
+    let mut text = String::new();
+    std::io::stdin()
+        .take(1024 * 1024)
+        .read_to_string(&mut text)
+        .ok()?;
+    serde_json::from_str(&text).ok()
+}
+
+/// Hook events that must not change the pane's state: a subagent finishing
+/// is not the agent finishing, so it must not make the pane look done.
+fn ignore_hook(hook: &serde_json::Value, state: Option<AgentState>) -> bool {
+    if hook["hook_event_name"] == "SubagentStop" {
+        return true;
+    }
+    let subagent = hook.get("agent_id").is_some_and(|id| !id.is_null());
+    subagent && matches!(state, Some(AgentState::Idle) | None)
 }
 
 /// `hivemux list [--json]`
@@ -111,17 +151,20 @@ pub fn new(args: &[String]) -> Result<()> {
 /// `hivemux hooks`: the Claude Code hook config that reports the agent state.
 pub fn hooks() -> Result<()> {
     let hook = |state: &str| {
-        serde_json::json!([{ "hooks": [{
+        serde_json::json!([{ "matcher": "*", "hooks": [{
             "type": "command",
             "command": format!("hivemux status {state}"),
+            "timeout": 10,
         }]}])
     };
     let config = serde_json::json!({
         "hooks": {
+            "SessionStart": hook("idle"),
             "UserPromptSubmit": hook("working"),
             "PreToolUse": hook("working"),
-            "Notification": hook("blocked"),
+            "PermissionRequest": hook("blocked"),
             "Stop": hook("idle"),
+            "SessionEnd": hook("clear"),
         }
     });
     println!("{}", serde_json::to_string_pretty(&config)?);
@@ -177,6 +220,17 @@ mod tests {
         assert!(take_flag(&mut a, "--no-enter"));
         assert_eq!(a, args(&["hello", "world"]));
         assert!(take_value(&mut args(&["--pane"]), "--pane").is_err());
+    }
+
+    #[test]
+    fn subagents_do_not_finish_the_agent() {
+        let sub = serde_json::json!({"hook_event_name": "Stop", "agent_id": "a1"});
+        assert!(ignore_hook(&sub, Some(AgentState::Idle)));
+        assert!(!ignore_hook(&sub, Some(AgentState::Working)));
+        let main = serde_json::json!({"hook_event_name": "Stop", "session_id": "s"});
+        assert!(!ignore_hook(&main, Some(AgentState::Idle)));
+        let stop = serde_json::json!({"hook_event_name": "SubagentStop"});
+        assert!(ignore_hook(&stop, Some(AgentState::Working)));
     }
 
     #[test]

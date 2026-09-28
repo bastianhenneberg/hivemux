@@ -422,9 +422,16 @@ impl App {
     /// Answers a request from `hivemux status`, `list`, `send` or `new`.
     fn request(&mut self, request: Request) -> Reply {
         match request {
-            Request::Status { pane, state } => {
+            Request::Status {
+                pane,
+                state,
+                session,
+            } => {
                 let p = self.panes.get_mut(&pane).ok_or(format!("no pane {pane}"))?;
                 p.reported = state;
+                if session.is_some() {
+                    p.session = session;
+                }
                 Ok(serde_json::json!({ "pane": pane }))
             }
             Request::List => Ok(self.list()),
@@ -477,6 +484,7 @@ impl App {
                     "program": pane.program(),
                     "state": pane.agent_state().map(AgentState::name),
                     "cwd": pane.cwd(),
+                    "session": pane.session,
                 }));
             }
         }

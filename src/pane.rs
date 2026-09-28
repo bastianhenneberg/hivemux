@@ -27,6 +27,8 @@ pub struct Pane {
     last_output: Arc<Mutex<Instant>>,
     /// The agent state the program reported with `hivemux status`.
     pub reported: Option<AgentState>,
+    /// The agent's session id from its hooks, e.g. for `claude --resume`.
+    pub session: Option<String>,
     /// Whether the question on the screen was answered: input came while it
     /// was shown. Cleared once no question is shown anymore.
     answered: Cell<bool>,
@@ -123,6 +125,7 @@ impl Pane {
             size: (rows, cols),
             last_output,
             reported: None,
+            session: None,
             answered: Cell::new(false),
         })
     }

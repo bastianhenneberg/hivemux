@@ -85,8 +85,9 @@ cargo install --path .     # puts hivemux on your PATH
 hivemux hooks              # prints the hooks for ~/.claude/settings.json
 ```
 
-The hooks call `hivemux status working|blocked|idle`, which knows its pane from
-`$HIVEMUX_PANE` and does nothing outside hivemux.
+The hooks call `hivemux status working|blocked|idle|clear`, which knows its pane from
+`$HIVEMUX_PANE` and does nothing outside hivemux. It reads the hook's JSON from stdin: a subagent
+finishing does not mark the agent done, and the session id is kept to resume the agent later.
 
 Scripts and agents can drive hivemux too:
 
