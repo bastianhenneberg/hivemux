@@ -77,6 +77,7 @@ and named sessions show their name in the control bar.
 | `Ctrl+B` `Q` | Quit: end the session and every shell in it (asks first) |
 | `Ctrl+B` `b` | Show or hide the sidebar |
 | `Ctrl+B` `e` | Into the sidebar: `j`/`k` move, `Enter` go, `r` name, `x` close, `Esc` back |
+| `Ctrl+B` `F` | Focus mode: only the focused pane, no bars, sidebar or borders; again to leave |
 | `Ctrl+B` `S` | Sessions: switch to another one or start a new one |
 | `Ctrl+B` `,` | Settings |
 | `Ctrl+B` `R` | Reload the config file |

@@ -250,6 +250,8 @@ pub struct App {
     unseen: HashSet<PaneId>,
     /// Where the sidebar is drawn, if it is shown.
     sidebar: Option<Rect>,
+    /// Focus mode: no bars, no sidebar, no borders, only the focused pane.
+    focus_mode: bool,
     /// The focused pane's repository, for the sidebar.
     git: Option<GitState>,
     /// The focused pane as last seen, and the one before it, for `Ctrl+B ;`.
@@ -319,6 +321,7 @@ impl App {
             agents: HashMap::new(),
             unseen: HashSet::new(),
             sidebar: None,
+            focus_mode: false,
             git: None,
             current_focus: None,
             last_focus: None,
@@ -495,9 +498,7 @@ impl App {
 
     fn event_loop(&mut self, rx: &Receiver<AppEvent>) {
         while !self.quit {
-            let body = screen_layout(self.screen, &self.config.bars).body;
-            (self.body, self.sidebar) =
-                split_sidebar(body, &self.config.sidebar, self.sidebar_focused());
+            (_, self.body, self.sidebar) = self.areas(self.screen);
             self.sync_sizes();
             self.update_agents();
             self.track_focus();
@@ -536,12 +537,12 @@ impl App {
 
     /// Gives every pty the size of the area inside its pane's border.
     fn sync_sizes(&mut self) {
-        for (id, rect) in self.ws.rects(self.body) {
-            if let Some(pane) = self.panes.get_mut(&id) {
-                let inner = pane_inner(rect);
-                if let Err(e) = pane.resize(inner.height, inner.width) {
-                    eprintln!("failed to resize pane {id}: {e:#}");
-                }
+        for (id, rect) in self.rects_of(&self.ws) {
+            let inner = self.inner(rect);
+            if let Some(pane) = self.panes.get_mut(&id)
+                && let Err(e) = pane.resize(inner.height, inner.width)
+            {
+                eprintln!("failed to resize pane {id}: {e:#}");
             }
         }
     }
@@ -1220,6 +1221,7 @@ impl App {
             }
             Command::RenameWorkspace => self.start_prompt(RenameTarget::Workspace(self.workspace)),
             Command::FocusSidebar => self.focus_sidebar(),
+            Command::FocusMode => self.focus_mode = !self.focus_mode,
             Command::ToggleSidebar => {
                 self.config.sidebar.enabled = !self.config.sidebar.enabled;
                 if let Err(e) = self.config.save() {
@@ -1313,16 +1315,65 @@ impl App {
         }
     }
 
+    /// The bar lines, the panes' area and the sidebar's. Focus mode leaves
+    /// all of the screen to the panes; a focused sidebar still shows.
+    fn areas(&self, screen: Rect) -> (ScreenLayout, Rect, Option<Rect>) {
+        if self.focus_mode {
+            let layout = ScreenLayout {
+                top: None,
+                body: screen,
+                bottom: None,
+            };
+            let (body, sidebar) = if self.sidebar_focused() {
+                split_sidebar(screen, &self.config.sidebar, true)
+            } else {
+                (screen, None)
+            };
+            return (layout, body, sidebar);
+        }
+        let layout = screen_layout(screen, &self.config.bars);
+        let (body, sidebar) =
+            split_sidebar(layout.body, &self.config.sidebar, self.sidebar_focused());
+        (layout, body, sidebar)
+    }
+
+    /// The panes of `ws` that are shown, with their areas. In focus mode
+    /// that is only the focused one, over all of the panes' area.
+    fn rects_of(&self, ws: &Workspace) -> Vec<(PaneId, Rect)> {
+        if self.focus_mode {
+            vec![(ws.focus, self.body)]
+        } else {
+            ws.rects(self.body)
+        }
+    }
+
+    /// The shown pane at `pos`, the topmost where floating panes overlap.
+    fn pane_at(&self, pos: Position) -> Option<(PaneId, Rect)> {
+        if self.focus_mode {
+            return Some((self.ws.focus, self.body)).filter(|(_, r)| r.contains(pos));
+        }
+        self.ws.pane_at(pos, self.body)
+    }
+
+    /// The area of a pane's screen: inside its border, or all of it in
+    /// focus mode, which has no borders.
+    fn inner(&self, rect: Rect) -> Rect {
+        if self.focus_mode {
+            rect
+        } else {
+            pane_inner(rect)
+        }
+    }
+
     /// The area inside the focused pane's border.
     fn focused_inner(&self) -> Option<Rect> {
         self.inner_of(self.ws.focus)
     }
 
     fn inner_of(&self, id: PaneId) -> Option<Rect> {
-        self.ws
-            .rects(self.body)
+        self.rects_of(&self.ws)
             .into_iter()
-            .find_map(|(pane, rect)| (pane == id).then(|| pane_inner(rect)))
+            .find_map(|(pane, rect)| (pane == id).then(|| self.inner(rect)))
     }
 
     /// The absolute position of a cell of pane `id` at `row`, `col` in its
@@ -1550,12 +1601,13 @@ impl App {
                     }
                     return Ok(());
                 }
-                let Some((id, rect)) = self.ws.pane_at(pos, self.body) else {
+                let Some((id, rect)) = self.pane_at(pos) else {
                     return Ok(());
                 };
                 // A border where two tiled panes meet moves when dragged.
                 if !self.ws.is_floating(id)
                     && self.ws.zoomed.is_none()
+                    && !self.focus_mode
                     && let Some(path) = self.ws.layout.divider_at(pos, self.body)
                 {
                     self.divider = path;
@@ -1566,7 +1618,7 @@ impl App {
                     self.leave_copy();
                 }
                 self.ws.focus(id);
-                if self.ws.is_floating(id) {
+                if self.ws.is_floating(id) && !self.focus_mode {
                     if pos.y == rect.y {
                         self.drag = Some(Drag::Move {
                             id,
@@ -1579,7 +1631,7 @@ impl App {
                         return Ok(());
                     }
                 }
-                let inner = pane_inner(rect);
+                let inner = self.inner(rect);
                 if !inner.contains(pos) || self.forward_mouse(id, event, inner)? {
                     return Ok(());
                 }
@@ -1664,10 +1716,10 @@ impl App {
                 None => self.forward_to_focused(event)?,
             },
             MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
-                let Some((id, rect)) = self.ws.pane_at(pos, self.body) else {
+                let Some((id, rect)) = self.pane_at(pos) else {
                     return Ok(());
                 };
-                let inner = pane_inner(rect);
+                let inner = self.inner(rect);
                 if self.forward_mouse(id, event, inner)? {
                     return Ok(());
                 }
@@ -1762,7 +1814,7 @@ impl App {
     /// The workspace whose tab is at `pos`, if any.
     fn tab_at(&self, pos: Position) -> Option<u8> {
         let bars = &self.config.bars;
-        let layout = screen_layout(self.screen, bars);
+        let (layout, ..) = self.areas(self.screen);
         let side = if layout.top.is_some_and(|r| r.contains(pos)) {
             Placement::Top
         } else if layout.bottom.is_some_and(|r| r.contains(pos)) {
@@ -2260,7 +2312,7 @@ impl App {
         let mut wanted: HashMap<(u32, u32), (u16, u16, u16, u16)> = HashMap::new();
         let quiet = matches!(self.mode, Mode::Normal | Mode::Repeat(..) | Mode::Copy);
         if enabled && quiet {
-            let rects = self.ws.rects(self.body);
+            let rects = self.rects_of(&self.ws);
             for (i, &(id, rect)) in rects.iter().enumerate() {
                 // Anything drawn later, i.e. a floating pane, hides it.
                 if rects[i + 1..].iter().any(|(_, r)| r.intersects(rect)) {
@@ -2659,11 +2711,9 @@ impl App {
     }
 
     fn draw(&self, frame: &mut Frame) {
-        let screen = screen_layout(frame.area(), &self.config.bars);
-        let (body, sidebar_area) =
-            split_sidebar(screen.body, &self.config.sidebar, self.sidebar_focused());
+        let (screen, body, sidebar_area) = self.areas(frame.area());
 
-        for (id, rect) in self.ws.rects(body) {
+        for (id, rect) in self.rects_of(&self.ws) {
             let Some(pane) = self.panes.get(&id) else {
                 continue;
             };
@@ -2717,15 +2767,17 @@ impl App {
                     Style::new().fg(t.magenta),
                 ));
             }
-            let block = Block::bordered()
-                .border_type(BorderType::Rounded)
-                .border_style(border)
-                .title(Line::from(title));
-            let inner = block.inner(rect);
+            let inner = self.inner(rect);
             if floating {
                 frame.render_widget(Clear, rect);
             }
-            frame.render_widget(block, rect);
+            if !self.focus_mode {
+                let block = Block::bordered()
+                    .border_type(BorderType::Rounded)
+                    .border_style(border)
+                    .title(Line::from(title));
+                frame.render_widget(block, rect);
+            }
 
             let selection = self.selection.filter(|s| s.pane == id).map(|s| {
                 (
@@ -2772,6 +2824,9 @@ impl App {
         }
         if let Some(area) = screen.bottom {
             self.draw_bar(frame, area, Placement::Bottom);
+        }
+        if self.focus_mode {
+            self.draw_focus_overlay(frame, frame.area());
         }
 
         match self.mode {
@@ -2939,6 +2994,46 @@ impl App {
 
     /// One bar line: control bar and workspace tabs on the left, the path
     /// on the right, whichever of them the settings put on `side`.
+    /// What focus mode keeps of the bars: the control line while a menu or
+    /// the prefix is up, and a corner note when an agent elsewhere waits.
+    fn draw_focus_overlay(&self, frame: &mut Frame, screen: Rect) {
+        if !matches!(self.mode, Mode::Normal) {
+            let side = self.config.bars.control();
+            let y = match side {
+                Placement::Top => screen.y,
+                _ => screen.bottom().saturating_sub(1),
+            };
+            let line = Rect {
+                y,
+                height: 1.min(screen.height),
+                ..screen
+            };
+            frame.render_widget(Clear, line);
+            self.draw_bar(frame, line, side);
+        }
+        let waiting = self
+            .panes
+            .keys()
+            .filter(|&&id| id != self.ws.focus)
+            .filter(|&&id| self.shown_state(id) == Some(AgentState::Blocked))
+            .count();
+        if waiting > 0 {
+            let text = format!(" {} {waiting} waiting ", AgentState::Blocked.symbol());
+            let width = (text.chars().count() as u16).min(screen.width);
+            let area = Rect {
+                x: screen.right() - width,
+                y: screen.y,
+                width,
+                height: 1.min(screen.height),
+            };
+            let t = theme::current();
+            frame.render_widget(
+                Paragraph::new(text).style(Style::new().fg(t.on_accent).bg(t.danger)),
+                area,
+            );
+        }
+    }
+
     fn draw_bar(&self, frame: &mut Frame, area: Rect, side: Placement) {
         let bars = &self.config.bars;
         let t = theme::current();

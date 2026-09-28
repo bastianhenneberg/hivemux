@@ -43,6 +43,8 @@ pub enum Command {
     FocusSidebar,
     /// Show or hide the sidebar.
     ToggleSidebar,
+    /// Hide bars, sidebar and borders and show only the focused pane.
+    FocusMode,
     /// Focus the agent waiting longest for the user.
     JumpToWaiting,
     /// Scroll back and select text with the keyboard.
@@ -359,6 +361,12 @@ pub const BINDINGS: &[Binding] = &[
         description: "into the sidebar",
         group: Group::View,
         keys: &[(Key::plain(Char('e')), C::FocusSidebar)],
+    },
+    Binding {
+        label: "F",
+        description: "focus mode",
+        group: Group::View,
+        keys: &[(Key::plain(Char('F')), C::FocusMode)],
     },
     Binding {
         label: "q",
