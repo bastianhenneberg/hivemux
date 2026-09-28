@@ -6,7 +6,7 @@ hivemux combines tiling and floating windows with a tmux-style prefix, and keeps
 the agents running in its panes: working, blocked, or idle.
 
 > **Status:** early prototype. hivemux runs shells in split panes, including full-screen
-> programs like nvim. Everything else on the roadmap is still to come.
+> programs like nvim, and keeps them running when you detach.
 
 ## Ideas
 
@@ -22,7 +22,7 @@ Inspired by [TUIOS](https://github.com/Gaurav-Gosain/tuios) and [herdr](https://
 
 1. ~~One shell in one pane (PTY → VT emulation → rendering)~~ ✓
 2. ~~Splits with a BSP tree, focus, resize, prefix keys~~ ✓
-3. Server/client split with detach and reattach
+3. ~~Server/client split with detach and reattach~~ ✓
 4. Floating windows and workspaces
 5. Copy mode, scrollback, mouse
 6. Agent status, socket API
@@ -31,8 +31,16 @@ Inspired by [TUIOS](https://github.com/Gaurav-Gosain/tuios) and [herdr](https://
 ## Build
 
 ```bash
-cargo run --release
+cargo build --release
+./target/release/hivemux            # attach to the session, or start one
+./target/release/hivemux attach     # attach, fail if there is no session
+./target/release/hivemux kill-server
 ```
+
+The first `hivemux` starts a server in the background. It owns the shells and keeps them
+running after you detach or close the terminal. The socket lives in
+`$XDG_RUNTIME_DIR/hivemux/`, set `HIVEMUX_SOCKET` to use another one. One client is attached at
+a time, attaching from a second terminal detaches the first.
 
 | Key | Action |
 |---|---|
@@ -42,7 +50,8 @@ cargo run --release
 | `Ctrl+B` `←↑↓→` | Focus the pane in that direction |
 | `Ctrl+B` `o` | Focus the next pane |
 | `Ctrl+B` `Ctrl+←↑↓→` | Resize by one cell (`Alt` for five) |
-| `Ctrl+B` `q` | Quit |
+| `Ctrl+B` `d` | Detach, the shells keep running |
+| `Ctrl+B` `q` | Quit, closing every pane |
 | `Ctrl+B` `Ctrl+B` | Send `Ctrl+B` to the shell |
 
 Focus and resize repeat: for 600 ms after one of them, arrow keys work without the prefix.

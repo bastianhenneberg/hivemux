@@ -9,10 +9,22 @@ Projekt-Slug: `hivemux`
 
 ## Stack
 
-- UI: `ratatui` (crossterm über `ratatui::crossterm`, keine eigene crossterm-Abhängigkeit,
-  damit die Versionen nicht auseinanderlaufen)
+- UI: `ratatui`. `crossterm` ist zusätzlich direkt eingebunden, nur wegen des `serde`-Features
+  (Events gehen per Socket vom Client zum Server). Version muss zu der von ratatui passen,
+  sonst gibt es zwei crossterm-Versionen: `cargo tree -d | grep crossterm` prüft das.
 - PTY: `portable-pty`
 - VT-Emulation: `vt100` (später evtl. `alacritty_terminal`)
+
+## Architektur
+
+- `hivemux server` (vom ersten Client im Hintergrund per `setsid` gestartet) besitzt PTYs,
+  Layout und rendert. Der Client ist dünn: Raw-Mode, schickt crossterm-Events, schreibt die
+  ANSI-Ausgabe des Servers auf stdout. Protokoll: `src/protocol.rs` (Tag + Länge + Payload).
+- Der Server rendert mit `Viewport::Fixed` in einen Socket-Writer. **Nie** `terminal.clear()`
+  oder `terminal.resize()` aufrufen: beide fragen das (nicht vorhandene) TTY des Servers
+  nach Cursor bzw. Größe. Bei Resize wird das Terminal neu gebaut.
+- Manuell testen ohne die eigene Session zu stören: `HIVEMUX_SOCKET=/tmp/x.sock` setzen,
+  headless in tmux starten (`tmux new-session -d ...`, `send-keys`, `capture-pane -p`).
 
 ## Befehle
 

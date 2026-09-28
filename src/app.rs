@@ -1,23 +1,27 @@
-//! The event loop: terminal input and pty output come in over one channel,
-//! the screen is redrawn after each batch of events.
+//! The server's state and event loop. Pty output, client input and client
+//! connections all come in over one channel, and after each batch of events
+//! the screen is rendered for the attached client.
 
 use std::collections::HashMap;
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
+use std::io::{self, Write};
+use std::os::unix::net::UnixStream;
+use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
-use ratatui::DefaultTerminal;
-use ratatui::Frame;
-use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use ratatui::backend::CrosstermBackend;
+use ratatui::crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::layout::{Constraint, Layout as UiLayout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType};
+use ratatui::{Frame, Terminal, TerminalOptions, Viewport};
 
 use crate::keys;
 use crate::layout::{Axis, Direction, Layout, MIN_PANE_SIZE, PaneId};
 use crate::pane::Pane;
+use crate::protocol::{ClientMsg, ServerMsg};
 use crate::render::ScreenView;
 
 const HONEY: Color = Color::Rgb(250, 190, 0);
@@ -27,10 +31,17 @@ const HONEY: Color = Color::Rgb(250, 190, 0);
 /// `repeat-time`.
 const REPEAT_TIME: Duration = Duration::from_millis(600);
 
+/// The screen size assumed until a client tells us its real one.
+const DEFAULT_SCREEN: Rect = Rect::new(0, 0, 80, 24);
+
+pub type ClientId = u64;
+
 pub enum AppEvent {
-    Term(Event),
     PtyOutput,
     PtyExited(PaneId),
+    ClientConnected(UnixStream),
+    ClientMsg(ClientId, ClientMsg),
+    ClientGone(ClientId),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -42,13 +53,70 @@ enum Mode {
     Repeat(Instant),
 }
 
+/// The attached client. Rendering goes through a ratatui terminal whose
+/// output is sent to the client instead of being written to a tty.
+struct Client {
+    id: ClientId,
+    stream: UnixStream,
+    terminal: Terminal<CrosstermBackend<FrameSink>>,
+}
+
+impl Client {
+    /// A terminal of exactly `screen`'s size. It never asks a tty for its
+    /// size, the server has none, the client reports it instead.
+    fn terminal_for(
+        stream: &UnixStream,
+        screen: Rect,
+    ) -> io::Result<Terminal<CrosstermBackend<FrameSink>>> {
+        let sink = FrameSink {
+            stream: stream.try_clone()?,
+            buf: Vec::new(),
+        };
+        Terminal::with_options(
+            CrosstermBackend::new(sink),
+            TerminalOptions {
+                viewport: Viewport::Fixed(screen),
+            },
+        )
+    }
+
+    fn send(&mut self, msg: &ServerMsg) -> io::Result<()> {
+        msg.write_to(&mut self.stream)
+    }
+}
+
+/// Collects what ratatui writes and sends it to the client as one
+/// `ServerMsg::Output` frame per flush.
+struct FrameSink {
+    stream: UnixStream,
+    buf: Vec<u8>,
+}
+
+impl Write for FrameSink {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        self.buf.extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        if self.buf.is_empty() {
+            return Ok(());
+        }
+        ServerMsg::Output(std::mem::take(&mut self.buf)).write_to(&mut self.stream)
+    }
+}
+
 pub struct App {
     panes: HashMap<PaneId, Pane>,
     layout: Layout,
     focus: PaneId,
     next_id: PaneId,
+    /// The attached client's screen.
+    screen: Rect,
     /// Where the panes are drawn, i.e. the screen minus the status bar.
     body: Rect,
+    client: Option<Client>,
+    next_client_id: ClientId,
     events: Sender<AppEvent>,
     title: String,
     mode: Mode,
@@ -56,39 +124,39 @@ pub struct App {
 }
 
 impl App {
-    pub fn run(terminal: &mut DefaultTerminal) -> Result<()> {
-        let (tx, rx) = mpsc::channel();
-        spawn_input_thread(tx.clone())?;
-
-        let size = terminal.size()?;
-        let body = body_area(Rect::new(0, 0, size.width, size.height));
+    /// Starts with one pane and runs until the last pane is closed or the
+    /// server is told to shut down.
+    pub fn run(events: Sender<AppEvent>, rx: &Receiver<AppEvent>) -> Result<()> {
+        let body = body_area(DEFAULT_SCREEN);
         let inner = pane_inner(body);
-        let first = Pane::spawn(0, inner.height, inner.width, tx.clone())?;
+        let first = Pane::spawn(0, inner.height, inner.width, events.clone())?;
 
         let mut app = App {
             panes: HashMap::from([(0, first)]),
             layout: Layout::new(0),
             focus: 0,
             next_id: 1,
+            screen: DEFAULT_SCREEN,
             body,
-            events: tx,
+            client: None,
+            next_client_id: 0,
+            events,
             title: shell_name(),
             mode: Mode::Normal,
             quit: false,
         };
-        app.event_loop(terminal, &rx)
+        app.event_loop(rx);
+        if let Some(mut client) = app.client.take() {
+            let _ = client.send(&ServerMsg::Exited);
+        }
+        Ok(())
     }
 
-    fn event_loop(
-        &mut self,
-        terminal: &mut DefaultTerminal,
-        rx: &Receiver<AppEvent>,
-    ) -> Result<()> {
+    fn event_loop(&mut self, rx: &Receiver<AppEvent>) {
         while !self.quit {
-            let size = terminal.size()?;
-            self.body = body_area(Rect::new(0, 0, size.width, size.height));
-            self.sync_sizes()?;
-            terminal.draw(|frame| self.draw(frame))?;
+            self.body = body_area(self.screen);
+            self.sync_sizes();
+            self.render();
 
             // Block for the next event, then take everything else that is
             // already queued, so a burst of output costs one redraw.
@@ -108,31 +176,120 @@ impl App {
                     Err(_) => break,
                 },
             };
-            self.handle(event)?;
+            self.handle(event);
             while let Ok(event) = rx.try_recv() {
-                self.handle(event)?;
+                self.handle(event);
             }
         }
-        Ok(())
     }
 
     /// Gives every pty the size of the area inside its pane's border.
-    fn sync_sizes(&mut self) -> Result<()> {
+    fn sync_sizes(&mut self) {
         for (id, rect) in self.layout.rects(self.body) {
             if let Some(pane) = self.panes.get_mut(&id) {
                 let inner = pane_inner(rect);
-                pane.resize(inner.height, inner.width)?;
+                if let Err(e) = pane.resize(inner.height, inner.width) {
+                    eprintln!("failed to resize pane {id}: {e:#}");
+                }
             }
         }
+    }
+
+    /// Draws the screen for the attached client. A client that cannot be
+    /// written to anymore is dropped.
+    fn render(&mut self) {
+        let Some(mut client) = self.client.take() else {
+            return;
+        };
+        if client.terminal.draw(|frame| self.draw(frame)).is_ok() {
+            self.client = Some(client);
+        }
+    }
+
+    fn handle(&mut self, event: AppEvent) {
+        let result = match event {
+            AppEvent::PtyOutput => Ok(()),
+            AppEvent::PtyExited(id) => {
+                self.close(id);
+                Ok(())
+            }
+            AppEvent::ClientConnected(stream) => self.attach(stream),
+            AppEvent::ClientMsg(id, msg) if self.client.as_ref().is_some_and(|c| c.id == id) => {
+                self.handle_client_msg(msg)
+            }
+            AppEvent::ClientMsg(_, ClientMsg::KillServer) => {
+                self.quit = true;
+                Ok(())
+            }
+            AppEvent::ClientMsg(..) => Ok(()),
+            AppEvent::ClientGone(id) => {
+                if self.client.as_ref().is_some_and(|c| c.id == id) {
+                    self.client = None;
+                }
+                Ok(())
+            }
+        };
+        if let Err(e) = result {
+            eprintln!("{e:#}");
+        }
+    }
+
+    /// Makes `stream` the attached client, detaching the previous one.
+    fn attach(&mut self, stream: UnixStream) -> Result<()> {
+        self.detach();
+
+        let id = self.next_client_id;
+        self.next_client_id += 1;
+
+        let mut reader = stream.try_clone()?;
+        let events = self.events.clone();
+        thread::Builder::new()
+            .name(format!("client-{id}"))
+            .spawn(move || {
+                while let Ok(Some(msg)) = ClientMsg::read_from(&mut reader) {
+                    if events.send(AppEvent::ClientMsg(id, msg)).is_err() {
+                        return;
+                    }
+                }
+                let _ = events.send(AppEvent::ClientGone(id));
+            })?;
+
+        let terminal = Client::terminal_for(&stream, self.screen)?;
+        self.client = Some(Client {
+            id,
+            stream,
+            terminal,
+        });
+        self.mode = Mode::Normal;
         Ok(())
     }
 
-    fn handle(&mut self, event: AppEvent) -> Result<()> {
-        match event {
-            AppEvent::Term(Event::Key(key)) => self.handle_key(key)?,
-            AppEvent::Term(Event::Paste(text)) => self.paste(&text)?,
-            AppEvent::Term(_) | AppEvent::PtyOutput => {}
-            AppEvent::PtyExited(id) => self.close(id),
+    fn detach(&mut self) {
+        if let Some(mut client) = self.client.take() {
+            let _ = client.send(&ServerMsg::Detached);
+        }
+    }
+
+    fn handle_client_msg(&mut self, msg: ClientMsg) -> Result<()> {
+        match msg {
+            ClientMsg::Event(Event::Key(key)) => self.handle_key(key),
+            ClientMsg::Event(Event::Paste(text)) => self.paste(&text),
+            ClientMsg::Event(Event::Resize(cols, rows)) => self.resize_screen(cols, rows),
+            ClientMsg::Event(_) => Ok(()),
+            ClientMsg::KillServer => {
+                self.quit = true;
+                Ok(())
+            }
+        }
+    }
+
+    /// Adopts the client's new screen size. The terminal is rebuilt rather
+    /// than resized, since resizing makes ratatui ask the tty for its size.
+    fn resize_screen(&mut self, cols: u16, rows: u16) -> Result<()> {
+        self.screen = Rect::new(0, 0, cols, rows);
+        if let Some(client) = &mut self.client {
+            client.send(&ServerMsg::Output(b"\x1b[2J".to_vec()))?;
+            client.terminal = Client::terminal_for(&client.stream, self.screen)?;
         }
         Ok(())
     }
@@ -192,6 +349,7 @@ impl App {
 
         match key.code {
             KeyCode::Char('q') => self.quit = true,
+            KeyCode::Char('d') => self.detach(),
             KeyCode::Char('%') => self.split(Axis::Row),
             KeyCode::Char('"') => self.split(Axis::Column),
             KeyCode::Char('x') => self.close(self.focus),
@@ -323,7 +481,7 @@ impl App {
             Mode::Prefix => {
                 spans.push(Span::styled(" PREFIX ", badge));
                 spans.push(Span::styled(
-                    "  % split │  \" split ─  x close  o next  ←↑↓→ focus  ^←↑↓→ resize  q quit",
+                    "  % split │  \" split ─  x close  o next  ←↑↓→ focus  ^←↑↓→ resize  d detach  q quit",
                     Style::new().fg(HONEY),
                 ));
             }
@@ -337,7 +495,7 @@ impl App {
             Mode::Normal => {
                 spans.push(Span::styled(
                     format!(
-                        "{} {} · ^B % \" split · ^B q quit",
+                        "{} {} · ^B % \" split · ^B d detach",
                         self.panes.len(),
                         if self.panes.len() == 1 {
                             "pane"
@@ -386,15 +544,4 @@ fn shell_name() -> String {
         .ok()
         .and_then(|shell| shell.rsplit('/').next().map(str::to_owned))
         .unwrap_or_else(|| "shell".into())
-}
-
-fn spawn_input_thread(tx: Sender<AppEvent>) -> Result<()> {
-    thread::Builder::new().name("input".into()).spawn(move || {
-        while let Ok(event) = event::read() {
-            if tx.send(AppEvent::Term(event)).is_err() {
-                break;
-            }
-        }
-    })?;
-    Ok(())
 }
