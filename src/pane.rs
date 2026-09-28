@@ -10,6 +10,7 @@ use anyhow::{Context, Result};
 use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
 
 use crate::app::AppEvent;
+use crate::layout::PaneId;
 
 const SCROLLBACK_LINES: usize = 10_000;
 
@@ -24,8 +25,8 @@ pub struct Pane {
 impl Pane {
     /// Spawns the user's default shell in a new pty of `rows` x `cols`.
     /// Output is fed into the VT parser on a background thread, which sends
-    /// `AppEvent::PtyOutput` after every chunk and `AppEvent::PtyExited` at EOF.
-    pub fn spawn(rows: u16, cols: u16, events: Sender<AppEvent>) -> Result<Self> {
+    /// `AppEvent::PtyOutput` after every chunk and `AppEvent::PtyExited(id)` at EOF.
+    pub fn spawn(id: PaneId, rows: u16, cols: u16, events: Sender<AppEvent>) -> Result<Self> {
         let rows = rows.max(1);
         let cols = cols.max(1);
 
@@ -73,7 +74,7 @@ impl Pane {
                         }
                     }
                 }
-                let _ = events.send(AppEvent::PtyExited);
+                let _ = events.send(AppEvent::PtyExited(id));
             })?;
 
         Ok(Self {

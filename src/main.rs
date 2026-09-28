@@ -1,5 +1,6 @@
 mod app;
 mod keys;
+mod layout;
 mod pane;
 mod render;
 

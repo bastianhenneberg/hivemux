@@ -5,7 +5,7 @@ A terminal multiplexer and window manager for humans and their coding agents, wr
 hivemux combines tiling and floating windows with a tmux-style prefix, and keeps an eye on
 the agents running in its panes: working, blocked, or idle.
 
-> **Status:** early prototype. hivemux runs your shell in a single pane, including full-screen
+> **Status:** early prototype. hivemux runs shells in split panes, including full-screen
 > programs like nvim. Everything else on the roadmap is still to come.
 
 ## Ideas
@@ -21,7 +21,7 @@ Inspired by [TUIOS](https://github.com/Gaurav-Gosain/tuios) and [herdr](https://
 ## Roadmap
 
 1. ~~One shell in one pane (PTY → VT emulation → rendering)~~ ✓
-2. Splits with a BSP tree, focus, resize, prefix keys
+2. ~~Splits with a BSP tree, focus, resize, prefix keys~~ ✓
 3. Server/client split with detach and reattach
 4. Floating windows and workspaces
 5. Copy mode, scrollback, mouse
@@ -36,10 +36,17 @@ cargo run --release
 
 | Key | Action |
 |---|---|
+| `Ctrl+B` `%` | Split the pane side by side |
+| `Ctrl+B` `"` | Split the pane top and bottom |
+| `Ctrl+B` `x` | Close the pane |
+| `Ctrl+B` `←↑↓→` | Focus the pane in that direction |
+| `Ctrl+B` `o` | Focus the next pane |
+| `Ctrl+B` `Ctrl+←↑↓→` | Resize by one cell (`Alt` for five) |
 | `Ctrl+B` `q` | Quit |
 | `Ctrl+B` `Ctrl+B` | Send `Ctrl+B` to the shell |
 
-hivemux also exits when the shell exits.
+Focus and resize repeat: for 600 ms after one of them, arrow keys work without the prefix.
+A pane closes when its shell exits, hivemux exits with the last pane.
 
 ## License
 
