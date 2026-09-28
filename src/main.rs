@@ -9,6 +9,7 @@ mod pane;
 mod protocol;
 mod render;
 mod server;
+mod workspace;
 
 use anyhow::{Result, bail};
 

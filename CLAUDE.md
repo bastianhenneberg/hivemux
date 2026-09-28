@@ -23,6 +23,8 @@ Projekt-Slug: `hivemux`
 - Der Server rendert mit `Viewport::Fixed` in einen Socket-Writer. **Nie** `terminal.clear()`
   oder `terminal.resize()` aufrufen: beide fragen das (nicht vorhandene) TTY des Servers
   nach Cursor bzw. Größe. Bei Resize wird das Terminal neu gebaut.
+- Workspace-Logik (Tiling-Baum + Floats + Fokus) ist reine Geometrie in `src/workspace.rs` und dort
+  getestet. `App` hält den aktiven Workspace in `ws`, die übrigen in `hidden`, und tauscht beim Wechsel.
 - Tastenbelegung nach dem Prefix steht **nur** in `src/bindings.rs` (`BINDINGS`). Which-Key-Menü,
   Hilfe-Overlay und `hivemux keys` lesen daraus, neue Befehle dort eintragen, nicht in `app.rs`.
 - Einstellungen: `src/config.rs` (serde/TOML, `SETTINGS`-Tabelle fürs Settings-Menü). Neue

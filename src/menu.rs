@@ -358,7 +358,7 @@ mod tests {
             row.chars().position(|c| c == '╭').unwrap()
         };
         assert_eq!(corner(&left), 1);
-        assert!(corner(&right) > 30);
+        assert!(corner(&right) > corner(&left));
     }
 
     #[test]

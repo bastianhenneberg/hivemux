@@ -23,7 +23,7 @@ Inspired by [TUIOS](https://github.com/Gaurav-Gosain/tuios) and [herdr](https://
 1. ~~One shell in one pane (PTY → VT emulation → rendering)~~ ✓
 2. ~~Splits with a BSP tree, focus, resize, prefix keys~~ ✓
 3. ~~Server/client split with detach and reattach~~ ✓
-4. Floating windows and ~~workspaces~~ ✓
+4. ~~Floating windows and workspaces~~ ✓
 5. Copy mode, scrollback, mouse
 6. Agent status, socket API
 7. Layout persistence across restarts
@@ -48,12 +48,15 @@ a time, attaching from a second terminal detaches the first.
 | `Ctrl+B` `%` | Split the pane side by side |
 | `Ctrl+B` `"` | Split the pane top and bottom |
 | `Ctrl+B` `x` | Close the pane (asks first) |
+| `Ctrl+B` `f` | Float the pane over the tiling, or put it back |
+| `Ctrl+B` `F` | New shell in a floating pane |
+| `Ctrl+B` `Shift+←↑↓→` | Move a floating pane |
 | `Ctrl+B` `←↑↓→` | Focus the pane in that direction |
 | `Ctrl+B` `o` | Focus the next pane |
 | `Ctrl+B` `1`–`9` | Go to workspace, an empty one starts a shell |
 | `Ctrl+B` `c` | New workspace |
 | `Ctrl+B` `n` / `p` | Next / previous workspace |
-| `Ctrl+B` `Ctrl+←↑↓→` | Resize by one cell (`Alt` for five) |
+| `Ctrl+B` `Ctrl+←↑↓→` | Resize by one cell (`Alt` for five), floating panes too |
 | `Ctrl+B` `q` | Quit menu: detach, close the pane or end the session |
 | `Ctrl+B` `d` | Detach, the shells keep running |
 | `Ctrl+B` `Q` | Quit: end the session and every shell in it (asks first) |
@@ -62,7 +65,7 @@ a time, attaching from a second terminal detaches the first.
 | `Ctrl+B` `Ctrl+B` | Send `Ctrl+B` to the shell |
 
 Pressing `Ctrl+B` opens a menu with every key, like which-key in Neovim.
-Focus and resize repeat: for 600 ms after one of them, arrow keys work without the prefix.
+Focus, move and resize repeat: for 600 ms after one of them, arrow keys work without the prefix.
 A pane closes when its shell exits, hivemux exits with the last pane.
 
 ## Settings

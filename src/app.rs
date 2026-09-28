@@ -21,11 +21,12 @@ use ratatui::{Frame, Terminal, TerminalOptions, Viewport};
 use crate::bindings::{self, Command};
 use crate::config::{Config, SETTINGS};
 use crate::keys;
-use crate::layout::{Axis, Layout, MIN_PANE_SIZE, PaneId};
+use crate::layout::{Axis, MIN_PANE_SIZE, PaneId};
 use crate::menu::{self, HONEY};
 use crate::pane::Pane;
 use crate::protocol::{ClientMsg, ServerMsg};
 use crate::render::ScreenView;
+use crate::workspace::Workspace;
 
 /// How long after a repeatable command (focus, resize) another arrow key
 /// repeats it without pressing the prefix again. Same idea as tmux's
@@ -138,14 +139,13 @@ impl Write for FrameSink {
 
 pub struct App {
     panes: HashMap<PaneId, Pane>,
-    /// The active workspace's layout and focused pane.
-    layout: Layout,
-    focus: PaneId,
+    /// The active workspace.
+    ws: Workspace,
     /// The number of the active workspace.
     workspace: u8,
-    /// The other workspaces, each with its layout and focused pane. Their
-    /// panes keep running, they are just not drawn.
-    hidden: BTreeMap<u8, (Layout, PaneId)>,
+    /// The other workspaces. Their panes keep running, they are just not
+    /// drawn.
+    hidden: BTreeMap<u8, Workspace>,
     next_id: PaneId,
     /// The attached client's screen.
     screen: Rect,
@@ -177,10 +177,9 @@ impl App {
 
         let mut app = App {
             panes: HashMap::from([(0, first)]),
-            layout: Layout::new(0),
+            ws: Workspace::new(0),
             workspace: 1,
             hidden: BTreeMap::new(),
-            focus: 0,
             next_id: 1,
             screen: DEFAULT_SCREEN,
             body,
@@ -233,7 +232,7 @@ impl App {
 
     /// Gives every pty the size of the area inside its pane's border.
     fn sync_sizes(&mut self) {
-        for (id, rect) in self.layout.rects(self.body) {
+        for (id, rect) in self.ws.rects(self.body) {
             if let Some(pane) = self.panes.get_mut(&id) {
                 let inner = pane_inner(rect);
                 if let Err(e) = pane.resize(inner.height, inner.width) {
@@ -383,7 +382,7 @@ impl App {
                     self.mode = Mode::Prefix;
                     return Ok(());
                 }
-                let Some(pane) = self.panes.get_mut(&self.focus) else {
+                let Some(pane) = self.panes.get_mut(&self.ws.focus) else {
                     return Ok(());
                 };
                 let app_cursor = pane.screen().screen().application_cursor();
@@ -404,16 +403,19 @@ impl App {
         match command {
             Command::SplitRow => self.split(Axis::Row),
             Command::SplitColumn => self.split(Axis::Column),
-            Command::ClosePane => self.mode = Mode::Confirm(Action::ClosePane(self.focus)),
-            Command::NextPane => self.cycle_focus(),
-            Command::Focus(dir) => {
-                if let Some(next) = self.layout.neighbor(self.focus, dir, self.body) {
-                    self.focus = next;
+            Command::ClosePane => self.mode = Mode::Confirm(Action::ClosePane(self.ws.focus)),
+            Command::NextPane => self.ws.cycle_focus(),
+            Command::Focus(dir) => self.ws.focus_direction(dir, self.body),
+            Command::Resize(dir, cells) => {
+                if !self.ws.resize_float(dir, cells, self.body) {
+                    self.ws.layout.resize(self.ws.focus, dir, cells, self.body);
                 }
             }
-            Command::Resize(dir, cells) => {
-                self.layout.resize(self.focus, dir, cells, self.body);
+            Command::Move(dir, cells) => {
+                self.ws.move_float(dir, cells, self.body);
             }
+            Command::ToggleFloat => self.ws.toggle_float(self.body),
+            Command::NewFloat => self.new_float(),
             Command::Detach => self.detach(),
             Command::Quit => self.mode = Mode::Confirm(Action::KillServer),
             Command::Help => self.mode = Mode::Help,
@@ -429,7 +431,7 @@ impl App {
             Command::PrevWorkspace => self.step_workspace(false),
             // Prefix twice sends the prefix key itself to the pane.
             Command::SendPrefix => {
-                if let Some(pane) = self.panes.get_mut(&self.focus) {
+                if let Some(pane) = self.panes.get_mut(&self.ws.focus) {
                     pane.write(&[0x02])?;
                 }
             }
@@ -466,7 +468,7 @@ impl App {
         self.mode = Mode::Normal;
         match entry {
             MenuEntry::Detach => self.detach(),
-            MenuEntry::ClosePane => self.close(self.focus),
+            MenuEntry::ClosePane => self.close(self.ws.focus),
             MenuEntry::EndSession => self.quit = true,
         }
     }
@@ -502,13 +504,14 @@ impl App {
     }
 
     /// Splits the focused pane and focuses the new one. Does nothing if the
-    /// pane is too small to be split.
+    /// pane floats or is too small to be split.
     fn split(&mut self, axis: Axis) {
         let Some((_, rect)) = self
+            .ws
             .layout
             .rects(self.body)
             .into_iter()
-            .find(|(id, _)| *id == self.focus)
+            .find(|(id, _)| *id == self.ws.focus)
         else {
             return;
         };
@@ -522,22 +525,36 @@ impl App {
 
         let id = self.next_id;
         self.next_id += 1;
-        self.layout.split(self.focus, axis, id);
+        self.ws.split(axis, id);
+        self.spawn_into_ws(id);
+    }
 
+    /// Starts a shell in a new floating pane in the middle of the screen.
+    fn new_float(&mut self) {
+        let id = self.next_id;
+        self.next_id += 1;
+        self.ws.add_float(id, self.body);
+        self.spawn_into_ws(id);
+    }
+
+    /// Starts the shell for pane `id`, which was just added to the active
+    /// workspace, sized to the area it got there. Takes the pane out again
+    /// if the shell cannot be started.
+    fn spawn_into_ws(&mut self, id: PaneId) {
         let rect = self
-            .layout
+            .ws
             .rects(self.body)
             .into_iter()
             .find_map(|(pane, rect)| (pane == id).then_some(rect))
-            .unwrap_or(rect);
+            .unwrap_or(self.body);
         let inner = pane_inner(rect);
         match Pane::spawn(id, inner.height, inner.width, self.events.clone()) {
             Ok(pane) => {
                 self.panes.insert(id, pane);
-                self.focus = id;
             }
-            Err(_) => {
-                self.layout.remove(id);
+            Err(e) => {
+                eprintln!("failed to start a shell: {e:#}");
+                self.ws.remove(id);
             }
         }
     }
@@ -550,34 +567,24 @@ impl App {
             return;
         }
 
-        if !self.layout.contains(id) {
+        if !self.ws.contains(id) {
             let Some(n) = self
                 .hidden
                 .iter()
-                .find_map(|(n, (layout, _))| layout.contains(id).then_some(*n))
+                .find_map(|(n, ws)| ws.contains(id).then_some(*n))
             else {
                 return;
             };
-            let (layout, focus) = self.hidden.get_mut(&n).expect("found above");
-            let next = layout.remove(id);
-            if *focus == id
-                && let Some(next) = next
-            {
-                *focus = next;
-            }
-            if layout.is_empty() {
+            let ws = self.hidden.get_mut(&n).expect("found above");
+            ws.remove(id);
+            if ws.is_empty() {
                 self.hidden.remove(&n);
             }
             return;
         }
 
-        let next = self.layout.remove(id);
-        if self.focus == id
-            && let Some(next) = next
-        {
-            self.focus = next;
-        }
-        if self.layout.is_empty() {
+        self.ws.remove(id);
+        if self.ws.is_empty() {
             // Show the nearest remaining workspace, preferring a lower number.
             let current = self.workspace;
             let nearest = self
@@ -628,8 +635,7 @@ impl App {
         self.panes.insert(id, pane);
         self.stash();
         self.workspace = n;
-        self.layout = Layout::new(id);
-        self.focus = id;
+        self.ws = Workspace::new(id);
     }
 
     /// Goes to the next or previous workspace that exists, wrapping around.
@@ -650,32 +656,24 @@ impl App {
     /// Brings hidden workspace `n` to the front, hiding the active one unless
     /// it is empty.
     fn show(&mut self, n: u8) {
-        let Some((layout, focus)) = self.hidden.remove(&n) else {
+        let Some(ws) = self.hidden.remove(&n) else {
             return;
         };
         self.stash();
         self.workspace = n;
-        self.layout = layout;
-        self.focus = focus;
+        self.ws = ws;
     }
 
     /// Moves the active workspace into `hidden`, if it has any panes.
     fn stash(&mut self) {
-        let layout = std::mem::replace(&mut self.layout, Layout::empty());
-        if !layout.is_empty() {
-            self.hidden.insert(self.workspace, (layout, self.focus));
-        }
-    }
-
-    fn cycle_focus(&mut self) {
-        let panes = self.layout.panes();
-        if let Some(i) = panes.iter().position(|&id| id == self.focus) {
-            self.focus = panes[(i + 1) % panes.len()];
+        let ws = std::mem::replace(&mut self.ws, Workspace::empty());
+        if !ws.is_empty() {
+            self.hidden.insert(self.workspace, ws);
         }
     }
 
     fn paste(&mut self, text: &str) -> Result<()> {
-        let Some(pane) = self.panes.get_mut(&self.focus) else {
+        let Some(pane) = self.panes.get_mut(&self.ws.focus) else {
             return Ok(());
         };
         let bracketed = pane.screen().screen().bracketed_paste();
@@ -691,11 +689,12 @@ impl App {
     fn draw(&self, frame: &mut Frame) {
         let [body, status_area] = split_screen(frame.area());
 
-        for (id, rect) in self.layout.rects(body) {
+        for (id, rect) in self.ws.rects(body) {
             let Some(pane) = self.panes.get(&id) else {
                 continue;
             };
-            let focused = id == self.focus;
+            let focused = id == self.ws.focus;
+            let floating = self.ws.is_floating(id);
             let border = if focused {
                 Style::new().fg(HONEY)
             } else {
@@ -704,8 +703,15 @@ impl App {
             let block = Block::bordered()
                 .border_type(BorderType::Rounded)
                 .border_style(border)
-                .title(format!(" {id} {} ", self.title));
+                .title(if floating {
+                    format!(" {id} {} ⧉ ", self.title)
+                } else {
+                    format!(" {id} {} ", self.title)
+                });
             let inner = block.inner(rect);
+            if floating {
+                frame.render_widget(Clear, rect);
+            }
             frame.render_widget(block, rect);
 
             let parser = pane.screen();
@@ -755,7 +761,7 @@ impl App {
                 },
                 MenuEntry::ClosePane => menu::MenuItem {
                     key,
-                    title: format!("Close pane {}", self.focus),
+                    title: format!("Close pane {}", self.ws.focus),
                     hint: "ends the program running in it".into(),
                     danger: true,
                 },

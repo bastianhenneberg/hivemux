@@ -18,6 +18,9 @@ pub enum Command {
     NextPane,
     Focus(Direction),
     Resize(Direction, u16),
+    Move(Direction, u16),
+    ToggleFloat,
+    NewFloat,
     Detach,
     SessionMenu,
     Settings,
@@ -35,7 +38,10 @@ impl Command {
     /// Repeatable commands keep the prefix active for a moment, so arrow keys
     /// can be pressed again without it.
     pub fn repeatable(self) -> bool {
-        matches!(self, Command::Focus(_) | Command::Resize(..))
+        matches!(
+            self,
+            Command::Focus(_) | Command::Resize(..) | Command::Move(..)
+        )
     }
 }
 
@@ -79,6 +85,13 @@ impl Key {
         }
     }
 
+    const fn shift(code: KeyCode) -> Self {
+        Self {
+            code,
+            mods: KeyModifiers::SHIFT,
+        }
+    }
+
     const fn alt(code: KeyCode) -> Self {
         Self {
             code,
@@ -86,11 +99,15 @@ impl Key {
         }
     }
 
-    /// Whether `event` is this key. Shift is ignored: it is part of the
-    /// character already (`%`, `Q`), and terminals disagree on whether they
-    /// report it on top.
+    /// Whether `event` is this key. For characters Shift is ignored: it is
+    /// part of the character already (`%`, `Q`), and terminals disagree on
+    /// whether they report it on top. For other keys, like arrows, Shift
+    /// counts.
     pub fn matches(self, event: KeyEvent) -> bool {
-        let relevant = KeyModifiers::CONTROL | KeyModifiers::ALT;
+        let relevant = match self.code {
+            KeyCode::Char(_) => KeyModifiers::CONTROL | KeyModifiers::ALT,
+            _ => KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SHIFT,
+        };
         event.code == self.code && event.modifiers & relevant == self.mods
     }
 }
@@ -125,6 +142,29 @@ pub const BINDINGS: &[Binding] = &[
         description: "close pane",
         group: Group::Panes,
         keys: &[(Key::plain(Char('x')), C::ClosePane)],
+    },
+    Binding {
+        label: "f",
+        description: "float / tile pane",
+        group: Group::Panes,
+        keys: &[(Key::plain(Char('f')), C::ToggleFloat)],
+    },
+    Binding {
+        label: "F",
+        description: "new floating pane",
+        group: Group::Panes,
+        keys: &[(Key::plain(Char('F')), C::NewFloat)],
+    },
+    Binding {
+        label: "Shift ←↑↓→",
+        description: "move floating pane",
+        group: Group::Panes,
+        keys: &[
+            (Key::shift(KeyCode::Left), C::Move(Left, 1)),
+            (Key::shift(KeyCode::Right), C::Move(Right, 1)),
+            (Key::shift(KeyCode::Up), C::Move(Up, 1)),
+            (Key::shift(KeyCode::Down), C::Move(Down, 1)),
+        ],
     },
     Binding {
         label: "←↑↓→",
@@ -321,6 +361,18 @@ mod tests {
             Some(C::SessionMenu)
         );
         assert_eq!(lookup(event(Char('x'), KeyModifiers::CONTROL)), None);
+    }
+
+    #[test]
+    fn shift_counts_for_arrows() {
+        assert_eq!(
+            lookup(event(KeyCode::Left, KeyModifiers::NONE)),
+            Some(C::Focus(Left))
+        );
+        assert_eq!(
+            lookup(event(KeyCode::Left, KeyModifiers::SHIFT)),
+            Some(C::Move(Left, 1))
+        );
     }
 
     #[test]
