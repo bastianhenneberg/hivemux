@@ -4,6 +4,7 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::{self, Write};
+use std::os::fd::{AsRawFd, FromRawFd, RawFd};
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
@@ -33,6 +34,7 @@ use crate::protocol::{self, Caps, ClientMsg, RenameTarget, Reply, Request, Serve
 use crate::render::ScreenView;
 use crate::sidebar::{self, state_style};
 use crate::theme;
+use crate::upgrade::{self, Handover};
 use crate::workspace::Workspace;
 use crate::{clipboard, mouse};
 
@@ -252,6 +254,10 @@ pub struct App {
     sidebar: Option<Rect>,
     /// Focus mode: no bars, no sidebar, no borders, only the focused pane.
     focus_mode: bool,
+    /// The server socket's listener, handed on by `hivemux update`.
+    listener: RawFd,
+    /// The binary `hivemux update` asked to become, once the reply is out.
+    upgrade_to: Option<PathBuf>,
     /// The focused pane's repository, for the sidebar.
     git: Option<GitState>,
     /// The focused pane as last seen, and the one before it, for `Ctrl+B ;`.
@@ -299,7 +305,13 @@ pub struct App {
 impl App {
     /// Starts with one pane and runs until the last pane is closed or the
     /// server is told to shut down.
-    pub fn run(events: Sender<AppEvent>, rx: &Receiver<AppEvent>, socket: PathBuf) -> Result<()> {
+    pub fn run(
+        events: Sender<AppEvent>,
+        rx: &Receiver<AppEvent>,
+        socket: PathBuf,
+        listener: RawFd,
+        handover: Option<Handover>,
+    ) -> Result<()> {
         let (config, config_error) = Config::load();
         if let Some(e) = &config_error {
             eprintln!("config: {e}");
@@ -322,6 +334,8 @@ impl App {
             unseen: HashSet::new(),
             sidebar: None,
             focus_mode: false,
+            listener,
+            upgrade_to: None,
             git: None,
             current_focus: None,
             last_focus: None,
@@ -350,7 +364,10 @@ impl App {
             quit: false,
         };
         app.apply_theme();
-        app.restore();
+        match handover {
+            Some(handover) => app.adopt(handover),
+            None => app.restore(),
+        }
         if app.panes.is_empty() {
             app.start_fresh()?;
         }
@@ -436,20 +453,9 @@ impl App {
                 }
             }
         }
-        workspaces.retain(|_, ws| !ws.is_empty());
-        self.next_id = self.panes.keys().max().map_or(0, |id| id + 1);
-
-        let active = if workspaces.contains_key(&saved.active) {
-            Some(saved.active)
-        } else {
-            workspaces.keys().next().copied()
-        };
-        let Some(active) = active else {
+        if !self.install(workspaces, saved.active) {
             return;
-        };
-        self.ws = workspaces.remove(&active).expect("checked above");
-        self.workspace = active;
-        self.hidden = workspaces;
+        }
         let count = self.panes.len();
         self.flash = Some(format!(
             "restored {count} {} from before the restart",
@@ -457,16 +463,112 @@ impl App {
         ));
     }
 
-    /// Saves the layout when it changed, at most once a second.
-    fn save_state(&mut self) {
-        let Some(path) = self.state_path.clone() else {
-            return;
+    /// Shows `active` of `workspaces`, or the first if it is gone, and
+    /// keeps the others hidden. False when no workspace has panes.
+    fn install(&mut self, mut workspaces: BTreeMap<u8, Workspace>, active: u8) -> bool {
+        workspaces.retain(|_, ws| !ws.is_empty());
+        self.next_id = self.panes.keys().max().map_or(0, |id| id + 1);
+        let active = if workspaces.contains_key(&active) {
+            Some(active)
+        } else {
+            workspaces.keys().next().copied()
         };
-        if self.last_save_at.elapsed() < Duration::from_secs(1) {
+        let Some(active) = active else {
+            return false;
+        };
+        self.ws = workspaces.remove(&active).expect("checked above");
+        self.workspace = active;
+        self.hidden = workspaces;
+        true
+    }
+
+    /// Takes over from the server before `hivemux update`: its panes with
+    /// their processes and screens, its layout and its attached client.
+    fn adopt(&mut self, handover: Handover) {
+        self.screen = Rect::new(0, 0, handover.screen.0, handover.screen.1);
+        self.focus_mode = handover.focus_mode;
+        let saved = handover.saved;
+        let mut handed = handover.panes;
+        let mut workspaces = saved.workspaces;
+        for ws in workspaces.values_mut() {
+            for id in ws.panes() {
+                let spec = saved.panes.get(&id).cloned().unwrap_or_default();
+                match handed
+                    .remove(&id)
+                    .map(|p| Pane::adopt(id, &p, self.events.clone()))
+                {
+                    Some(Ok(mut pane)) => {
+                        pane.session = spec.session;
+                        pane.name = spec.name;
+                        self.panes.insert(id, pane);
+                    }
+                    Some(Err(e)) => {
+                        eprintln!("update: could not take over pane {id}: {e:#}");
+                        ws.remove(id);
+                    }
+                    None => ws.remove(id),
+                }
+            }
+        }
+        // A pane without a place in the layout ends like a closed one.
+        for (id, rest) in handed {
+            if let Ok(pane) = Pane::adopt(id, &rest, self.events.clone()) {
+                drop(pane);
+            }
+        }
+        if !self.install(workspaces, saved.active) {
             return;
         }
-        self.last_save_at = Instant::now();
+        (_, self.body, self.sidebar) = self.areas(self.screen);
+        if let Some(fd) = handover.client {
+            let _ = upgrade::set_cloexec(fd, true);
+            // SAFETY: the server before handed its client's connection over.
+            let stream = unsafe { UnixStream::from_raw_fd(fd) };
+            let id = self.next_client_id;
+            if let Err(e) = self.connect(stream).and_then(|()| self.attach(id)) {
+                eprintln!("update: could not keep the client: {e:#}");
+            }
+            self.caps = handover.caps;
+            if let Some(client) = &mut self.client {
+                // Drawn afresh: the new terminal state knows nothing of
+                // what the client shows.
+                let _ = client.send(&ServerMsg::Output(b"\x1b[H\x1b[2J".to_vec()));
+            }
+        }
+        self.flash = Some(format!(
+            "updated to hivemux {}, {} panes kept",
+            env!("CARGO_PKG_VERSION"),
+            self.panes.len()
+        ));
+    }
 
+    /// Becomes the binary at `exe` with the session kept, see `upgrade`.
+    /// Returns only if that fails.
+    fn upgrade(&mut self, exe: &std::path::Path) {
+        let mut panes = BTreeMap::new();
+        for (&id, pane) in &self.panes {
+            let Some(handed) = pane.handover() else {
+                self.flash = Some(format!("update: pane {id} cannot be handed over"));
+                return;
+            };
+            panes.insert(id, handed);
+        }
+        let handover = Handover {
+            listener: self.listener,
+            client: self.client.as_ref().map(|c| c.stream.as_raw_fd()),
+            screen: (self.screen.width, self.screen.height),
+            caps: self.caps,
+            focus_mode: self.focus_mode,
+            saved: self.saved(),
+            panes,
+        };
+        let e = upgrade::exec(exe, &self.socket, &handover);
+        eprintln!("update failed: {e:#}");
+        self.flash = Some(format!("update failed: {e:#}"));
+    }
+
+    /// The layout as `persist` saves it.
+    fn saved(&self) -> Saved {
         let mut workspaces = self.hidden.clone();
         workspaces.insert(self.workspace, self.ws.clone());
         let panes = self
@@ -483,8 +585,20 @@ impl App {
                 (id, saved)
             })
             .collect();
-        let saved = Saved::new(self.workspace, workspaces, panes);
-        let Ok(json) = persist::to_json(&saved) else {
+        Saved::new(self.workspace, workspaces, panes)
+    }
+
+    /// Saves the layout when it changed, at most once a second.
+    fn save_state(&mut self) {
+        let Some(path) = self.state_path.clone() else {
+            return;
+        };
+        if self.last_save_at.elapsed() < Duration::from_secs(1) {
+            return;
+        }
+        self.last_save_at = Instant::now();
+
+        let Ok(json) = persist::to_json(&self.saved()) else {
             return;
         };
         if json == self.last_saved {
@@ -531,6 +645,9 @@ impl App {
             self.handle(event);
             while let Ok(event) = rx.try_recv() {
                 self.handle(event);
+            }
+            if let Some(exe) = self.upgrade_to.take() {
+                self.upgrade(&exe);
             }
         }
     }
@@ -732,6 +849,13 @@ impl App {
                 workspace,
                 cwd,
             } => self.new_pane(&command, float, workspace, cwd),
+            Request::Upgrade { exe } => {
+                if !exe.is_file() {
+                    return Err(format!("{} does not exist", exe.display()));
+                }
+                self.upgrade_to = Some(exe);
+                Ok(serde_json::json!({ "panes": self.panes.len() }))
+            }
         }
     }
 

@@ -340,6 +340,23 @@ fn take_value(args: &mut Vec<String>, option: &str) -> Result<Option<String>> {
     Ok(Some(value))
 }
 
+/// `hivemux update`: the running server becomes this binary, keeping every
+/// pane and the attached client, see `upgrade`.
+pub fn update() -> Result<()> {
+    let exe = std::env::current_exe()?;
+    let reply = client::request(Request::Upgrade { exe: exe.clone() })?;
+    let panes = reply["panes"].as_u64().unwrap_or(0);
+    // The new server takes the socket over; wait until it answers.
+    for _ in 0..100 {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        if client::request(Request::List).is_ok() {
+            println!("updated to {} ({panes} panes kept)", exe.display());
+            return Ok(());
+        }
+    }
+    anyhow::bail!("the server did not come back, see its log next to the socket")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

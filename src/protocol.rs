@@ -73,6 +73,9 @@ pub enum Request {
         target: RenameTarget,
         name: Option<String>,
     },
+    /// Replace the server with the binary at `exe`, keeping the session,
+    /// see `upgrade`.
+    Upgrade { exe: PathBuf },
     /// Start `command` (the shell if empty) in a new pane.
     New {
         command: Vec<String>,

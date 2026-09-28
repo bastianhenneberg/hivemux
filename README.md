@@ -132,6 +132,20 @@ hivemux read --pane 3 --lines 20               # what it wrote last
 hivemux rename --workspace 2 api               # name a workspace
 ```
 
+## Updates
+
+A new version does not need a restart:
+
+```bash
+cargo install --path . --locked && hivemux update
+```
+
+`hivemux update` tells the running server to become the new binary. It execs it in the same
+process, which keeps every pane's pty, the socket and the attached client's connection open, and
+hands over layout, names and screens (history included) in a file. Shells and agents keep
+running, the attached client just redraws. Only the server is updated: a client started before
+keeps its old code until it reattaches, fine as long as the protocol stays compatible.
+
 ## Restarts
 
 hivemux saves the layout to `~/.local/state/hivemux/session.json` while it runs: workspaces,

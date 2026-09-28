@@ -95,10 +95,76 @@ impl Pane {
         // Drop our copy of the slave side, so the reader sees EOF once the
         // child exits.
         drop(pair.slave);
+        Self::start(id, (rows, cols), pair.master, child, &[], events)
+    }
 
-        let mut reader = pair.master.try_clone_reader()?;
-        let writer = pair.master.take_writer()?;
-        let parser = Arc::new(Mutex::new(vt100::Parser::new(rows, cols, SCROLLBACK_LINES)));
+    /// Takes over the pane the server before `hivemux update` ran, see
+    /// `upgrade`.
+    pub fn adopt(
+        id: PaneId,
+        from: &crate::upgrade::HandoverPane,
+        events: Sender<AppEvent>,
+    ) -> Result<Self> {
+        use crate::upgrade::{AdoptedChild, AdoptedMaster, replay};
+        // SAFETY: the descriptor was handed over for this pane only.
+        let master = unsafe { AdoptedMaster::from_raw_fd(from.fd) };
+        let size = (from.rows.max(1), from.cols.max(1));
+        let before = replay(&from.history, &from.screen, size.0);
+        let mut pane = Self::start(
+            id,
+            size,
+            Box::new(master),
+            Box::new(AdoptedChild::new(from.pid)),
+            &before,
+            events,
+        )?;
+        pane.reported = from.reported;
+        Ok(pane)
+    }
+
+    /// What `hivemux update` hands over for this pane: the pty, the process
+    /// and what the screen shows. `None` if the pty has no descriptor.
+    pub fn handover(&self) -> Option<crate::upgrade::HandoverPane> {
+        let fd = self.master.as_raw_fd()?;
+        let pid = self.child.process_id()?;
+        let history_len = self.history_len();
+        let (rows, cols) = self.size;
+        let history = if history_len == 0 {
+            String::new()
+        } else {
+            self.text((0, 0), (history_len - 1, cols))
+        };
+        let mut parser = self.parser.lock().unwrap();
+        let offset = parser.screen().scrollback();
+        parser.screen_mut().set_scrollback(0);
+        let screen = parser.screen().state_formatted();
+        parser.screen_mut().set_scrollback(offset);
+        Some(crate::upgrade::HandoverPane {
+            fd,
+            pid,
+            rows,
+            cols,
+            history,
+            screen,
+            reported: self.reported,
+        })
+    }
+
+    /// Reads the pty in the background into the terminal state, which starts
+    /// with `before` fed in.
+    fn start(
+        id: PaneId,
+        (rows, cols): (u16, u16),
+        master: Box<dyn MasterPty + Send>,
+        child: Box<dyn Child + Send + Sync>,
+        before: &[u8],
+        events: Sender<AppEvent>,
+    ) -> Result<Self> {
+        let mut reader = master.try_clone_reader()?;
+        let writer = master.take_writer()?;
+        let mut parser = vt100::Parser::new(rows, cols, SCROLLBACK_LINES);
+        parser.process(before);
+        let parser = Arc::new(Mutex::new(parser));
 
         let reader_parser = Arc::clone(&parser);
         let last_output = Arc::new(Mutex::new(Instant::now()));
@@ -159,7 +225,7 @@ impl Pane {
 
         Ok(Self {
             parser,
-            master: pair.master,
+            master,
             writer,
             child,
             size: (rows, cols),

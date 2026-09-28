@@ -17,6 +17,7 @@ mod render;
 mod server;
 mod sidebar;
 mod theme;
+mod upgrade;
 mod workspace;
 
 use anyhow::{Result, bail};
@@ -31,6 +32,8 @@ Commands:
   attach        attach to the session (`attach -t NAME` works too)
   ls            list the running sessions
   kill-server   shut down the session's server and every pane in it
+  update        move the running server to this binary, e.g. after
+                `cargo install`; panes, programs and screens stay
   keys          list the key bindings
 
 For scripts and agents:
@@ -96,6 +99,7 @@ fn main() -> Result<()> {
         ["read", ..] => cli::read(&args[1..]),
         ["wait", ..] => cli::wait(&args[1..]),
         ["hooks"] => cli::hooks(),
+        ["update"] => cli::update(),
         ["help" | "-h" | "--help"] => {
             println!("{USAGE}");
             Ok(())

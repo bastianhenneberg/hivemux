@@ -40,6 +40,12 @@ Projekt-Slug: `hivemux`
   `ClientMsg::Request` und bekommen `ServerMsg::Reply`. Befehle: `src/cli.rs`.
 - Agent-Tests ohne echten Agent: Skript namens `claude` im Scratchpad, das arbeitet und dann eine
   Frage stellt, per `hivemux new --workspace 2 -- <skript>` starten.
+- Live-Update: `hivemux update` (`src/upgrade.rs`): Server execs das neue Binary im selben Prozess,
+  PTY-Master-FDs, Listener und Client-Verbindung ohne `FD_CLOEXEC` weiter, Rest (Layout, Screens
+  als `state_formatted`, History als Text) in `<socket>.upgrade.json`, Env `HIVEMUX_UPGRADE`.
+  portable-pty kann keinen Master aus einem FD bauen → `AdoptedMaster`/`AdoptedChild` implementieren
+  dessen Traits. Protokoll kompatibel halten: der alte Client bleibt nach dem Update verbunden.
+  Test: Binary zweimal ins Scratchpad kopieren (hm1/hm2), mit hm1 starten, `hm2 update`, PIDs vergleichen.
 - Persistenz: `src/persist.rs`, Datei `~/.local/state/hivemux/session.json` (mit `HIVEMUX_SOCKET`
   daneben als `<socket>.state.json`, mit `HIVEMUX_STATE` frei wählbar). Gespeichert höchstens 1×/s
   bei Änderung, gelöscht am Ende von `App::run` (nur bewusstes Beenden kommt dort an). Test: Server
