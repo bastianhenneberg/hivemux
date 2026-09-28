@@ -1,7 +1,7 @@
 //! A workspace: a tiling layout with floating panes on top, and which pane
 //! has focus. Pure geometry, the panes themselves live in the app.
 
-use ratatui::layout::Rect;
+use ratatui::layout::{Position, Rect};
 
 use crate::layout::{Axis, Direction, Layout, PaneId};
 
@@ -66,6 +66,28 @@ impl Workspace {
         let mut out = self.layout.rects(body);
         out.extend(self.floats.iter().map(|f| (f.id, clamp(f.rect, body))));
         out
+    }
+
+    /// The pane at `pos`, the topmost one where floating panes overlap, with
+    /// its area.
+    pub fn pane_at(&self, pos: Position, body: Rect) -> Option<(PaneId, Rect)> {
+        self.rects(body)
+            .into_iter()
+            .rev()
+            .find(|(_, rect)| rect.contains(pos))
+    }
+
+    /// Puts floating pane `pane` at `rect`, kept inside `body` and no smaller
+    /// than the minimum.
+    pub fn set_float_rect(&mut self, pane: PaneId, rect: Rect, body: Rect) {
+        if let Some(float) = self.floats.iter_mut().find(|f| f.id == pane) {
+            let rect = Rect {
+                width: rect.width.max(MIN_FLOAT_WIDTH),
+                height: rect.height.max(MIN_FLOAT_HEIGHT),
+                ..rect
+            };
+            float.rect = clamp(rect, body);
+        }
     }
 
     /// Focuses `pane`, raising it to the top if it floats.
@@ -357,6 +379,30 @@ mod tests {
 
         ws.focus(1);
         assert!(!ws.move_float(Direction::Left, 1, BODY));
+    }
+
+    #[test]
+    fn pane_at_finds_the_topmost() {
+        let mut ws = Workspace::new(1);
+        ws.add_float(2, BODY);
+        let (_, float) = ws.rects(BODY)[1];
+        let inside = Position::new(float.x + 1, float.y + 1);
+        assert_eq!(ws.pane_at(inside, BODY).map(|(id, _)| id), Some(2));
+        assert_eq!(
+            ws.pane_at(Position::new(0, 0), BODY).map(|(id, _)| id),
+            Some(1)
+        );
+        assert_eq!(ws.pane_at(Position::new(0, 40), BODY), None);
+    }
+
+    #[test]
+    fn set_float_rect_clamps() {
+        let mut ws = Workspace::new(1);
+        ws.add_float(2, BODY);
+        ws.set_float_rect(2, Rect::new(95, 38, 2, 2), BODY);
+        let (_, r) = ws.rects(BODY)[1];
+        assert_eq!((r.width, r.height), (MIN_FLOAT_WIDTH, MIN_FLOAT_HEIGHT));
+        assert!(r.right() <= BODY.right() && r.bottom() <= BODY.bottom());
     }
 
     #[test]

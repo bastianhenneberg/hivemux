@@ -12,7 +12,10 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use crossterm::cursor::Show;
-use crossterm::event::{self, DisableBracketedPaste, EnableBracketedPaste, Event};
+use crossterm::event::{
+    self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+    Event,
+};
 use crossterm::execute;
 use crossterm::terminal::{
     self, Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode,
@@ -43,12 +46,19 @@ pub fn run(start: bool) -> Result<()> {
         stdout(),
         EnterAlternateScreen,
         EnableBracketedPaste,
+        EnableMouseCapture,
         Clear(ClearType::All)
     )?;
 
     let outcome = session(stream);
 
-    let _ = execute!(stdout(), DisableBracketedPaste, LeaveAlternateScreen, Show);
+    let _ = execute!(
+        stdout(),
+        DisableMouseCapture,
+        DisableBracketedPaste,
+        LeaveAlternateScreen,
+        Show
+    );
     let _ = disable_raw_mode();
 
     match outcome? {

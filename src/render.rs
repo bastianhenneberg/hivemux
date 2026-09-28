@@ -7,11 +7,30 @@ use ratatui::widgets::Widget;
 
 pub struct ScreenView<'a> {
     screen: &'a vt100::Screen,
+    /// Highlighted cells from start to end inclusive, as (row, column) in
+    /// view coordinates. Rows may lie outside the view.
+    selection: Option<((i64, u16), (i64, u16))>,
 }
 
 impl<'a> ScreenView<'a> {
     pub fn new(screen: &'a vt100::Screen) -> Self {
-        Self { screen }
+        Self {
+            screen,
+            selection: None,
+        }
+    }
+
+    pub fn selection(mut self, selection: Option<((i64, u16), (i64, u16))>) -> Self {
+        self.selection = selection.map(|(a, b)| if a <= b { (a, b) } else { (b, a) });
+        self
+    }
+
+    fn selected(&self, row: u16, col: u16) -> bool {
+        let Some((start, end)) = self.selection else {
+            return false;
+        };
+        let pos = (i64::from(row), col);
+        start <= pos && pos <= end
     }
 
     /// Where the terminal cursor should be shown for a view drawn at `area`,
@@ -44,7 +63,11 @@ impl Widget for ScreenView<'_> {
                 } else {
                     target.set_symbol(" ");
                 }
-                target.set_style(cell_style(cell));
+                let mut style = cell_style(cell);
+                if self.selected(row, col) {
+                    style = style.add_modifier(Modifier::REVERSED);
+                }
+                target.set_style(style);
             }
         }
     }
@@ -106,6 +129,21 @@ mod tests {
         assert_eq!(buf[(3, 0)].symbol(), "r");
         assert_eq!(buf[(3, 0)].fg, Color::Indexed(1));
         assert_eq!(buf[(0, 0)].fg, Color::Reset);
+    }
+
+    #[test]
+    fn selection_is_highlighted() {
+        let mut parser = vt100::Parser::new(2, 10, 0);
+        parser.process(b"abcdef\r\nghijkl");
+        let area = Rect::new(0, 0, 10, 2);
+        let mut buf = Buffer::empty(area);
+        ScreenView::new(parser.screen())
+            .selection(Some(((1, 1), (0, 4))))
+            .render(area, &mut buf);
+        let reversed = |x, y| buf[(x, y)].modifier.contains(Modifier::REVERSED);
+        assert!(!reversed(3, 0));
+        assert!(reversed(4, 0) && reversed(9, 0) && reversed(0, 1) && reversed(1, 1));
+        assert!(!reversed(2, 1));
     }
 
     #[test]

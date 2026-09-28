@@ -29,6 +29,10 @@ pub enum Command {
     NextWorkspace,
     PrevWorkspace,
     NextFloat,
+    /// Scroll back and select text with the keyboard.
+    CopyMode,
+    /// Copy mode, scrolled up half a page right away.
+    ScrollBack,
     Quit,
     Help,
     SendPrefix,
@@ -218,6 +222,15 @@ pub const BINDINGS: &[Binding] = &[
             (Key::plain(KeyCode::Right), C::Focus(Right)),
             (Key::plain(KeyCode::Up), C::Focus(Up)),
             (Key::plain(KeyCode::Down), C::Focus(Down)),
+        ],
+    },
+    Binding {
+        label: "[ PgUp",
+        description: "scroll back / copy",
+        group: Group::Navigate,
+        keys: &[
+            (Key::plain(Char('[')), C::CopyMode),
+            (Key::plain(KeyCode::PageUp), C::ScrollBack),
         ],
     },
     Binding {

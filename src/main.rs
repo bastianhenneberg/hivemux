@@ -1,10 +1,12 @@
 mod app;
 mod bindings;
 mod client;
+mod clipboard;
 mod config;
 mod keys;
 mod layout;
 mod menu;
+mod mouse;
 mod pane;
 mod protocol;
 mod render;

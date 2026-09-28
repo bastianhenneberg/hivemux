@@ -12,8 +12,10 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use ratatui::backend::CrosstermBackend;
-use ratatui::crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind};
-use ratatui::layout::Rect;
+use ratatui::crossterm::event::{
+    Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+};
+use ratatui::layout::{Position, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Clear, Padding, Paragraph};
@@ -28,6 +30,7 @@ use crate::pane::Pane;
 use crate::protocol::{ClientMsg, ServerMsg};
 use crate::render::ScreenView;
 use crate::workspace::Workspace;
+use crate::{clipboard, mouse};
 
 /// How long after a repeatable command (focus, resize) another arrow key
 /// repeats it without pressing the prefix again. Same idea as tmux's
@@ -63,6 +66,36 @@ enum Mode {
     Menu(usize),
     /// The settings menu is open with the given setting selected.
     Settings(usize),
+    /// Scrolling and selecting with the keyboard, see `App::copy`.
+    Copy,
+}
+
+/// A mouse drag in progress.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Drag {
+    /// Moving a floating pane by its title bar, grabbed `dx` cells from its
+    /// left edge.
+    Move { id: PaneId, dx: u16 },
+    /// Resizing a floating pane by its bottom right corner.
+    Resize { id: PaneId },
+    /// Selecting text.
+    Select,
+}
+
+/// Selected text in a pane, from `anchor` to `head`, as (absolute row,
+/// column) where row 0 is the oldest line of the pane's history.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct Selection {
+    pane: PaneId,
+    anchor: (usize, u16),
+    head: (usize, u16),
+}
+
+/// The copy mode cursor, in the same coordinates as a selection.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct CopyCursor {
+    pane: PaneId,
+    pos: (usize, u16),
 }
 
 /// The entries of the quit menu, in order.
@@ -162,6 +195,12 @@ pub struct App {
     /// could not be loaded or saved.
     config_note: Option<String>,
     mode: Mode,
+    drag: Option<Drag>,
+    selection: Option<Selection>,
+    copy: Option<CopyCursor>,
+    /// A short message for the control bar, e.g. what was copied. Cleared by
+    /// the next key.
+    flash: Option<String>,
     quit: bool,
 }
 
@@ -192,6 +231,10 @@ impl App {
             config,
             config_note: config_error.map(|e| format!("config ignored: {e}")),
             mode: Mode::Normal,
+            drag: None,
+            selection: None,
+            copy: None,
+            flash: None,
             quit: false,
         };
         app.event_loop(rx);
@@ -324,6 +367,7 @@ impl App {
             ClientMsg::Event(Event::Key(key)) => self.handle_key(key),
             ClientMsg::Event(Event::Paste(text)) => self.paste(&text),
             ClientMsg::Event(Event::Resize(cols, rows)) => self.resize_screen(cols, rows),
+            ClientMsg::Event(Event::Mouse(event)) => self.mouse(event),
             ClientMsg::Event(_) => Ok(()),
             ClientMsg::KillServer => {
                 self.quit = true;
@@ -365,6 +409,10 @@ impl App {
                 self.settings_key(key, selected);
                 Ok(())
             }
+            Mode::Copy => {
+                self.copy_key(key);
+                Ok(())
+            }
             Mode::Confirm(action) => {
                 self.mode = Mode::Normal;
                 if matches!(key.code, KeyCode::Char('y' | 'Y')) {
@@ -384,9 +432,15 @@ impl App {
                     self.mode = Mode::Prefix(Menu::Root);
                     return Ok(());
                 }
+                self.flash = None;
+                self.selection = None;
                 let Some(pane) = self.panes.get_mut(&self.ws.focus) else {
                     return Ok(());
                 };
+                // Typing brings a scrolled back pane to its live screen.
+                if pane.scroll_offset() > 0 {
+                    pane.scroll_to(0);
+                }
                 let app_cursor = pane.screen().screen().application_cursor();
                 if let Some(bytes) = keys::encode(key, app_cursor) {
                     pane.write(&bytes)?;
@@ -421,6 +475,12 @@ impl App {
             Command::NextFloat => self.ws.next_float(),
             Command::Open(menu) => self.mode = Mode::Prefix(menu),
             Command::Back => self.mode = Mode::Prefix(Menu::Root),
+            Command::CopyMode => self.enter_copy(),
+            Command::ScrollBack => {
+                self.enter_copy();
+                let page = self.focused_inner().map_or(1, |r| r.height as isize);
+                self.copy_scroll(page);
+            }
             Command::Detach => self.detach(),
             Command::Quit => self.mode = Mode::Confirm(Action::KillServer),
             Command::Help => self.mode = Mode::Help,
@@ -499,6 +559,396 @@ impl App {
             }
             _ => {}
         }
+    }
+
+    /// The area inside the focused pane's border.
+    fn focused_inner(&self) -> Option<Rect> {
+        self.inner_of(self.ws.focus)
+    }
+
+    fn inner_of(&self, id: PaneId) -> Option<Rect> {
+        self.ws
+            .rects(self.body)
+            .into_iter()
+            .find_map(|(pane, rect)| (pane == id).then(|| pane_inner(rect)))
+    }
+
+    /// The absolute position of a cell of pane `id` at `row`, `col` in its
+    /// current view.
+    fn to_abs(&self, id: PaneId, row: u16, col: u16) -> (usize, u16) {
+        let Some(pane) = self.panes.get(&id) else {
+            return (0, col);
+        };
+        let top = pane.history_len() - pane.scroll_offset();
+        (top + usize::from(row), col)
+    }
+
+    /// The view row of absolute row `abs` in pane `id`, outside the view
+    /// when negative or past the bottom.
+    fn to_view(&self, id: PaneId, abs: usize) -> i64 {
+        let Some(pane) = self.panes.get(&id) else {
+            return -1;
+        };
+        let top = pane.history_len() - pane.scroll_offset();
+        abs as i64 - top as i64
+    }
+
+    /// Copies the selection to the client's clipboard.
+    fn copy_selection(&mut self) {
+        let Some(sel) = self.selection else { return };
+        let Some(pane) = self.panes.get(&sel.pane) else {
+            return;
+        };
+        let text = pane.text(sel.anchor, sel.head);
+        if text.is_empty() {
+            return;
+        }
+        let chars = text.chars().count();
+        if let Some(client) = &mut self.client {
+            let _ = client.send(&ServerMsg::Output(clipboard::osc52(&text)));
+        }
+        self.flash = Some(format!(
+            "copied {chars} {}",
+            if chars == 1 {
+                "character"
+            } else {
+                "characters"
+            }
+        ));
+    }
+
+    fn enter_copy(&mut self) {
+        let id = self.ws.focus;
+        let Some(pane) = self.panes.get(&id) else {
+            return;
+        };
+        let (row, col) = pane.screen().screen().cursor_position();
+        let pos = self.to_abs(id, row, col);
+        self.copy = Some(CopyCursor { pane: id, pos });
+        self.selection = None;
+        self.mode = Mode::Copy;
+    }
+
+    fn leave_copy(&mut self) {
+        if let Some(copy) = self.copy.take()
+            && let Some(pane) = self.panes.get_mut(&copy.pane)
+        {
+            pane.scroll_to(0);
+        }
+        self.mode = Mode::Normal;
+    }
+
+    /// Moves the copy cursor by `rows` and `cols`, scrolling to keep it in
+    /// view and dragging the selection's head along.
+    fn copy_move(&mut self, rows: isize, cols: isize) {
+        let Some(mut copy) = self.copy else { return };
+        let Some(inner) = self.inner_of(copy.pane) else {
+            return;
+        };
+        let Some(pane) = self.panes.get(&copy.pane) else {
+            return;
+        };
+        let last_row = pane.history_len() + usize::from(inner.height).saturating_sub(1);
+        copy.pos.0 = copy.pos.0.saturating_add_signed(rows).min(last_row);
+        let col = (copy.pos.1 as isize + cols).clamp(0, inner.width.saturating_sub(1) as isize);
+        copy.pos.1 = col as u16;
+        self.copy = Some(copy);
+        self.copy_show(copy);
+    }
+
+    /// Scrolls the copy mode view by `lines`, positive into the history,
+    /// and moves the cursor along, like Ctrl-U and Ctrl-D in vim.
+    fn copy_scroll(&mut self, lines: isize) {
+        let Some(mut copy) = self.copy else { return };
+        let Some(pane) = self.panes.get_mut(&copy.pane) else {
+            return;
+        };
+        let before = pane.scroll_offset();
+        pane.scroll(lines);
+        let moved = pane.scroll_offset() as isize - before as isize;
+        copy.pos.0 = copy.pos.0.saturating_add_signed(-moved);
+        self.copy = Some(copy);
+        if let Some(sel) = &mut self.selection {
+            sel.head = copy.pos;
+        }
+    }
+
+    /// Scrolls pane so that the copy cursor is in view.
+    fn copy_show(&mut self, copy: CopyCursor) {
+        let Some(inner) = self.inner_of(copy.pane) else {
+            return;
+        };
+        let view = self.to_view(copy.pane, copy.pos.0);
+        let Some(pane) = self.panes.get_mut(&copy.pane) else {
+            return;
+        };
+        if view < 0 {
+            pane.scroll(-view as isize);
+        } else if view >= i64::from(inner.height) {
+            pane.scroll(-((view - i64::from(inner.height) + 1) as isize));
+        }
+        if let Some(sel) = &mut self.selection {
+            sel.head = copy.pos;
+        }
+    }
+
+    /// Copy mode: vim-like keys move a cursor through the pane and its
+    /// history, `v` starts a selection, `y` copies it.
+    fn copy_key(&mut self, key: KeyEvent) {
+        let Some(copy) = self.copy else {
+            self.mode = Mode::Normal;
+            return;
+        };
+        let half = self
+            .inner_of(copy.pane)
+            .map_or(1, |r| (r.height / 2).max(1) as isize);
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q') => self.leave_copy(),
+            KeyCode::Char('u') if ctrl => self.copy_scroll(half),
+            KeyCode::Char('d') if ctrl => self.copy_scroll(-half),
+            KeyCode::PageUp => self.copy_scroll(2 * half),
+            KeyCode::PageDown => self.copy_scroll(-2 * half),
+            KeyCode::Char('k') | KeyCode::Up => self.copy_move(-1, 0),
+            KeyCode::Char('j') | KeyCode::Down => self.copy_move(1, 0),
+            KeyCode::Char('h') | KeyCode::Left => self.copy_move(0, -1),
+            KeyCode::Char('l') | KeyCode::Right => self.copy_move(0, 1),
+            KeyCode::Char('0') | KeyCode::Home => self.copy_move(0, -10_000),
+            KeyCode::Char('$') | KeyCode::End => self.copy_move(0, 10_000),
+            KeyCode::Char('g') => self.copy_move(-(isize::MAX / 2), 0),
+            KeyCode::Char('G') => self.copy_move(isize::MAX / 2, 0),
+            KeyCode::Char('v' | ' ') => {
+                self.selection = match self.selection {
+                    Some(_) => None,
+                    None => Some(Selection {
+                        pane: copy.pane,
+                        anchor: copy.pos,
+                        head: copy.pos,
+                    }),
+                };
+            }
+            KeyCode::Char('y') | KeyCode::Enter => {
+                self.copy_selection();
+                self.selection = None;
+                self.leave_copy();
+            }
+            _ => {}
+        }
+    }
+
+    /// Mouse: click focuses, dragging a floating pane's title bar moves it
+    /// and its bottom right corner resizes it, dragging over text selects and
+    /// copies it, the wheel scrolls back. Programs that asked for the mouse
+    /// get the events instead, unless Shift is held.
+    fn mouse(&mut self, event: MouseEvent) -> Result<()> {
+        if !matches!(self.mode, Mode::Normal | Mode::Repeat(..) | Mode::Copy) {
+            return Ok(());
+        }
+        let pos = Position::new(event.column, event.row);
+        match event.kind {
+            MouseEventKind::Down(MouseButton::Left) => {
+                self.selection = None;
+                self.flash = None;
+                if let Some(n) = self.tab_at(pos) {
+                    self.switch_workspace(n);
+                    return Ok(());
+                }
+                let Some((id, rect)) = self.ws.pane_at(pos, self.body) else {
+                    return Ok(());
+                };
+                if self.copy.is_some_and(|c| c.pane != id) {
+                    self.leave_copy();
+                }
+                self.ws.focus(id);
+                if self.ws.is_floating(id) {
+                    if pos.y == rect.y {
+                        self.drag = Some(Drag::Move {
+                            id,
+                            dx: pos.x - rect.x,
+                        });
+                        return Ok(());
+                    }
+                    if pos.x == rect.right() - 1 && pos.y == rect.bottom() - 1 {
+                        self.drag = Some(Drag::Resize { id });
+                        return Ok(());
+                    }
+                }
+                let inner = pane_inner(rect);
+                if !inner.contains(pos) || self.forward_mouse(id, event, inner)? {
+                    return Ok(());
+                }
+                let at = self.to_abs(id, pos.y - inner.y, pos.x - inner.x);
+                self.selection = Some(Selection {
+                    pane: id,
+                    anchor: at,
+                    head: at,
+                });
+                self.drag = Some(Drag::Select);
+            }
+            MouseEventKind::Drag(MouseButton::Left) => match self.drag {
+                Some(Drag::Move { id, dx }) => {
+                    if let Some((_, rect)) =
+                        self.ws.rects(self.body).into_iter().find(|(p, _)| *p == id)
+                    {
+                        let moved = Rect {
+                            x: pos.x.saturating_sub(dx),
+                            y: pos.y,
+                            ..rect
+                        };
+                        self.ws.set_float_rect(id, moved, self.body);
+                    }
+                }
+                Some(Drag::Resize { id }) => {
+                    if let Some((_, rect)) =
+                        self.ws.rects(self.body).into_iter().find(|(p, _)| *p == id)
+                    {
+                        let resized = Rect {
+                            width: (pos.x + 1).saturating_sub(rect.x),
+                            height: (pos.y + 1).saturating_sub(rect.y),
+                            ..rect
+                        };
+                        self.ws.set_float_rect(id, resized, self.body);
+                    }
+                }
+                Some(Drag::Select) => {
+                    let Some(sel) = self.selection else {
+                        return Ok(());
+                    };
+                    let Some(inner) = self.inner_of(sel.pane) else {
+                        return Ok(());
+                    };
+                    // Dragging past the top or bottom edge scrolls.
+                    if let Some(pane) = self.panes.get_mut(&sel.pane) {
+                        if pos.y < inner.y {
+                            pane.scroll(1);
+                        } else if pos.y >= inner.bottom() {
+                            pane.scroll(-1);
+                        }
+                    }
+                    let row = pos.y.clamp(inner.y, inner.bottom() - 1) - inner.y;
+                    let col = pos.x.clamp(inner.x, inner.right() - 1) - inner.x;
+                    let head = self.to_abs(sel.pane, row, col);
+                    if let Some(sel) = &mut self.selection {
+                        sel.head = head;
+                    }
+                }
+                None => self.forward_to_focused(event)?,
+            },
+            MouseEventKind::Up(MouseButton::Left) => match self.drag.take() {
+                Some(Drag::Select) => {
+                    if self.selection.is_some_and(|s| s.anchor != s.head) {
+                        self.copy_selection();
+                    } else {
+                        self.selection = None;
+                    }
+                }
+                Some(_) => {}
+                None => self.forward_to_focused(event)?,
+            },
+            MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
+                let Some((id, rect)) = self.ws.pane_at(pos, self.body) else {
+                    return Ok(());
+                };
+                let inner = pane_inner(rect);
+                if self.forward_mouse(id, event, inner)? {
+                    return Ok(());
+                }
+                let up = event.kind == MouseEventKind::ScrollUp;
+                let Some(pane) = self.panes.get_mut(&id) else {
+                    return Ok(());
+                };
+                let (alternate, app_cursor) = {
+                    let parser = pane.screen();
+                    (
+                        parser.screen().alternate_screen(),
+                        parser.screen().application_cursor(),
+                    )
+                };
+                if alternate {
+                    // Full screen programs without mouse support, like less,
+                    // get arrow keys, as most terminals do.
+                    let code = if up { KeyCode::Up } else { KeyCode::Down };
+                    if let Some(bytes) =
+                        keys::encode(KeyEvent::new(code, KeyModifiers::NONE), app_cursor)
+                    {
+                        for _ in 0..3 {
+                            pane.write(&bytes)?;
+                        }
+                    }
+                } else {
+                    pane.scroll(if up { 3 } else { -3 });
+                }
+            }
+            _ => self.forward_to_focused(event)?,
+        }
+        Ok(())
+    }
+
+    fn forward_to_focused(&mut self, event: MouseEvent) -> Result<()> {
+        if let Some(inner) = self.focused_inner() {
+            self.forward_mouse(self.ws.focus, event, inner)?;
+        }
+        Ok(())
+    }
+
+    /// Sends `event` to the program in pane `id` if it asked for mouse
+    /// events and the pointer is inside the pane. Returns whether it did.
+    fn forward_mouse(&mut self, id: PaneId, event: MouseEvent, inner: Rect) -> Result<bool> {
+        let pos = Position::new(event.column, event.row);
+        if event.modifiers.contains(KeyModifiers::SHIFT) || !inner.contains(pos) {
+            return Ok(false);
+        }
+        let Some(pane) = self.panes.get_mut(&id) else {
+            return Ok(false);
+        };
+        let (mode, encoding) = {
+            let parser = pane.screen();
+            (
+                parser.screen().mouse_protocol_mode(),
+                parser.screen().mouse_protocol_encoding(),
+            )
+        };
+        let Some(bytes) = mouse::encode(
+            event.kind,
+            event.modifiers,
+            pos.x - inner.x,
+            pos.y - inner.y,
+            mode,
+            encoding,
+        ) else {
+            return Ok(mode != vt100::MouseProtocolMode::None);
+        };
+        pane.write(&bytes)?;
+        Ok(true)
+    }
+
+    /// The workspace whose tab is at `pos`, if any.
+    fn tab_at(&self, pos: Position) -> Option<u8> {
+        let bars = &self.config.bars;
+        let layout = screen_layout(self.screen, bars);
+        let side = if layout.top.is_some_and(|r| r.contains(pos)) {
+            Placement::Top
+        } else if layout.bottom.is_some_and(|r| r.contains(pos)) {
+            Placement::Bottom
+        } else {
+            return None;
+        };
+        if bars.tabs != side {
+            return None;
+        }
+        let mut x = if bars.control() == side {
+            BADGE.chars().count() as u16 + 1
+        } else {
+            0
+        };
+        for n in self.workspaces() {
+            let width = format!(" {n} ").len() as u16;
+            if (x..x + width).contains(&pos.x) {
+                return Some(n);
+            }
+            x += width;
+        }
+        None
     }
 
     fn perform(&mut self, action: Action) {
@@ -726,13 +1176,19 @@ impl App {
             } else {
                 Style::new().fg(Color::DarkGray)
             };
+            let offset = pane.scroll_offset();
+            let scrolled = if offset > 0 {
+                format!("⇡{offset}/{} ", pane.history_len())
+            } else {
+                String::new()
+            };
             let block = Block::bordered()
                 .border_type(BorderType::Rounded)
                 .border_style(border)
                 .title(if floating {
-                    format!(" {id} {} ⧉ ", self.title)
+                    format!(" {id} {} ⧉ {scrolled}", self.title)
                 } else {
-                    format!(" {id} {} ", self.title)
+                    format!(" {id} {} {scrolled}", self.title)
                 });
             let inner = block.inner(rect);
             if floating {
@@ -740,15 +1196,26 @@ impl App {
             }
             frame.render_widget(block, rect);
 
+            let selection = self.selection.filter(|s| s.pane == id).map(|s| {
+                (
+                    (self.to_view(id, s.anchor.0), s.anchor.1),
+                    (self.to_view(id, s.head.0), s.head.1),
+                )
+            });
+            let copy_cursor = self.copy.filter(|c| c.pane == id).and_then(|c| {
+                let row = u16::try_from(self.to_view(id, c.pos.0)).ok()?;
+                Some(Position::new(inner.x + c.pos.1, inner.y + row))
+            });
             let parser = pane.screen();
-            let view = ScreenView::new(parser.screen());
-            let cursor = view.cursor(inner);
+            let view = ScreenView::new(parser.screen()).selection(selection);
+            let cursor = copy_cursor.or_else(|| view.cursor(inner));
             frame.render_widget(view, inner);
             if focused
                 && !matches!(
                     self.mode,
                     Mode::Confirm(_) | Mode::Help | Mode::Menu(_) | Mode::Settings(_)
                 )
+                && (self.mode != Mode::Copy || copy_cursor.is_some())
                 && let Some(position) = cursor
             {
                 frame.set_cursor_position(position);
@@ -776,7 +1243,7 @@ impl App {
             Mode::Help => menu::draw_help(frame, body),
             Mode::Menu(selected) => menu::draw_quit_menu(frame, body, &self.menu_items(), selected),
             Mode::Confirm(action) => self.draw_confirm(frame, body, action),
-            Mode::Prefix(_) | Mode::Normal | Mode::Repeat(..) => {}
+            Mode::Prefix(_) | Mode::Normal | Mode::Repeat(..) | Mode::Copy => {}
         }
     }
 
@@ -874,7 +1341,7 @@ impl App {
 
         let mut spans = Vec::new();
         if control {
-            spans.push(Span::styled(" ⬢ hivemux ", badge_style()));
+            spans.push(Span::styled(BADGE, badge_style()));
             spans.push(Span::raw(" "));
         }
         if bars.tabs == side {
@@ -948,6 +1415,13 @@ impl App {
                     Style::new().fg(HONEY),
                 ));
             }
+            Mode::Copy => {
+                spans.push(Span::styled(" COPY ", badge));
+                spans.push(Span::styled(
+                    "  hjkl ↑↓ move · ^U ^D page · g G top/bottom · v select · y copy · q quit",
+                    Style::new().fg(HONEY),
+                ));
+            }
             Mode::Help => {
                 spans.push(Span::styled(" HELP ", badge));
                 spans.push(Span::styled("  any key closes", Style::new().fg(HONEY)));
@@ -969,6 +1443,12 @@ impl App {
                 spans.push(Span::styled(" REPEAT ", badge));
                 spans.push(Span::styled(
                     "  ←↑↓→ focus  ^←↑↓→ resize",
+                    Style::new().fg(HONEY),
+                ));
+            }
+            Mode::Normal if self.flash.is_some() => {
+                spans.push(Span::styled(
+                    format!("✓ {}", self.flash.as_deref().unwrap_or_default()),
                     Style::new().fg(HONEY),
                 ));
             }
@@ -1032,6 +1512,8 @@ fn screen_layout(screen: Rect, bars: &Bars) -> ScreenLayout {
         bottom: (bottom > 0).then(|| line(screen.bottom() - 1)),
     }
 }
+
+const BADGE: &str = " ⬢ hivemux ";
 
 fn badge_style() -> Style {
     Style::new()

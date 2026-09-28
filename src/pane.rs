@@ -111,6 +111,41 @@ impl Pane {
         std::fs::read_link(format!("/proc/{pid}/cwd")).ok()
     }
 
+    /// How far the view is scrolled back into the history, 0 when the live
+    /// screen is shown.
+    pub fn scroll_offset(&self) -> usize {
+        self.parser.lock().unwrap().screen().scrollback()
+    }
+
+    /// Scrolls the view by `lines`, positive into the history. The offset is
+    /// clamped to the history there is.
+    pub fn scroll(&mut self, lines: isize) {
+        let mut parser = self.parser.lock().unwrap();
+        let screen = parser.screen_mut();
+        let offset = screen.scrollback().saturating_add_signed(lines);
+        screen.set_scrollback(offset);
+    }
+
+    pub fn scroll_to(&mut self, offset: usize) {
+        self.parser
+            .lock()
+            .unwrap()
+            .screen_mut()
+            .set_scrollback(offset);
+    }
+
+    /// The number of lines in the history above the live screen.
+    pub fn history_len(&self) -> usize {
+        history_len(&mut self.parser.lock().unwrap())
+    }
+
+    /// The text from `start` to `end` inclusive, both as (absolute row,
+    /// column), where absolute row 0 is the oldest line of the history.
+    /// Lines wrapped by the terminal are joined, trailing spaces dropped.
+    pub fn text(&self, start: (usize, u16), end: (usize, u16)) -> String {
+        text_between(&mut self.parser.lock().unwrap(), start, end)
+    }
+
     pub fn screen(&self) -> MutexGuard<'_, vt100::Parser> {
         self.parser.lock().unwrap()
     }
@@ -144,9 +179,100 @@ impl Pane {
     }
 }
 
+/// See `Pane::text`.
+fn text_between(parser: &mut vt100::Parser, start: (usize, u16), end: (usize, u16)) -> String {
+    let (start, end) = if start <= end {
+        (start, end)
+    } else {
+        (end, start)
+    };
+    let history = history_len(parser);
+    let screen = parser.screen_mut();
+    let saved = screen.scrollback();
+    let (rows, cols) = screen.size();
+
+    let mut out = String::new();
+    for abs in start.0..=end.0 {
+        // Scroll so that this row is in view, then read it there.
+        let offset = history.saturating_sub(abs);
+        screen.set_scrollback(offset);
+        let offset = screen.scrollback();
+        let Some(view_row) = (abs + offset).checked_sub(history) else {
+            continue;
+        };
+        let Ok(view_row) = u16::try_from(view_row) else {
+            continue;
+        };
+        if view_row >= rows {
+            continue;
+        }
+        let from = if abs == start.0 { start.1 } else { 0 };
+        let to = if abs == end.0 {
+            end.1.saturating_add(1).min(cols)
+        } else {
+            cols
+        };
+        let line = screen.contents_between(view_row, from, view_row, to);
+        out.push_str(line.trim_end());
+        if abs != end.0 && !screen.row_wrapped(view_row) {
+            out.push('\n');
+        }
+    }
+    screen.set_scrollback(saved);
+    out
+}
+
+/// The history length: vt100 clamps a too large offset to it.
+fn history_len(parser: &mut vt100::Parser) -> usize {
+    let screen = parser.screen_mut();
+    let saved = screen.scrollback();
+    screen.set_scrollback(usize::MAX);
+    let len = screen.scrollback();
+    screen.set_scrollback(saved);
+    len
+}
+
 impl Drop for Pane {
     fn drop(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 3 rows of screen, lines "line 0" .. "line 9" written, so 7 lines
+    /// went into the history.
+    fn parser_with_history() -> vt100::Parser {
+        let mut parser = vt100::Parser::new(3, 20, 100);
+        for i in 0..10 {
+            parser.process(format!("line {i}").as_bytes());
+            if i < 9 {
+                parser.process(b"\r\n");
+            }
+        }
+        parser
+    }
+
+    #[test]
+    fn history_length_counts_scrolled_off_lines() {
+        let mut parser = parser_with_history();
+        assert_eq!(history_len(&mut parser), 7);
+        assert_eq!(parser.screen().scrollback(), 0);
+    }
+
+    #[test]
+    fn text_reaches_into_the_history() {
+        let mut parser = parser_with_history();
+        assert_eq!(text_between(&mut parser, (0, 0), (1, 19)), "line 0\nline 1");
+        assert_eq!(
+            text_between(&mut parser, (6, 5), (9, 5)),
+            "6\nline 7\nline 8\nline 9"
+        );
+        // Reversed order works too, and the view stays where it was.
+        assert_eq!(text_between(&mut parser, (2, 3), (2, 0)), "line");
+        assert_eq!(parser.screen().scrollback(), 0);
     }
 }
