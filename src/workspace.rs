@@ -1,6 +1,8 @@
 //! A workspace: a tiling layout with floating panes on top, and which pane
 //! has focus. Pure geometry, the panes themselves live in the app.
 
+use std::sync::atomic::{AtomicU32, Ordering};
+
 use ratatui::layout::{Position, Rect};
 use serde::{Deserialize, Serialize};
 
@@ -9,6 +11,44 @@ use crate::layout::{Axis, Direction, Layout, PaneId};
 /// The smallest floating pane, border included.
 pub const MIN_FLOAT_WIDTH: u16 = 12;
 pub const MIN_FLOAT_HEIGHT: u16 = 5;
+
+/// Columns and rows between tiled panes, from the settings. Global like the
+/// theme, so every caller of `rects` sees the same gaps.
+static GAPS: AtomicU32 = AtomicU32::new(0);
+
+pub fn set_gaps(columns: u16, rows: u16) {
+    GAPS.store(
+        u32::from(columns) << 16 | u32::from(rows),
+        Ordering::Relaxed,
+    );
+}
+
+fn gaps() -> (u16, u16) {
+    let gaps = GAPS.load(Ordering::Relaxed);
+    ((gaps >> 16) as u16, gaps as u16)
+}
+
+/// `tiles` with `columns` and `rows` of space between neighbours: every tile
+/// that does not reach the right or bottom edge of `body` gives up that much
+/// on that side, as long as it keeps room for its border and a cell.
+fn with_gaps(
+    tiles: Vec<(PaneId, Rect)>,
+    body: Rect,
+    (columns, rows): (u16, u16),
+) -> Vec<(PaneId, Rect)> {
+    tiles
+        .into_iter()
+        .map(|(id, mut r)| {
+            if r.right() < body.right() && r.width > columns + 2 {
+                r.width -= columns;
+            }
+            if r.bottom() < body.bottom() && r.height > rows + 2 {
+                r.height -= rows;
+            }
+            (id, r)
+        })
+        .collect()
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Float {
@@ -84,7 +124,7 @@ impl Workspace {
         if let Some(id) = self.zoomed.filter(|id| self.contains(*id)) {
             return vec![(id, body)];
         }
-        let mut out = self.layout.rects(body);
+        let mut out = with_gaps(self.layout.rects(body), body, gaps());
         out.extend(self.floats.iter().map(|f| (f.id, clamp(f.rect, body))));
         out
     }
@@ -316,6 +356,20 @@ mod tests {
     use super::*;
 
     const BODY: Rect = Rect::new(0, 0, 100, 40);
+
+    #[test]
+    fn gaps_separate_tiles_but_not_the_edges() {
+        let body = Rect::new(0, 0, 80, 24);
+        let tiles = vec![
+            (1, Rect::new(0, 0, 40, 24)),
+            (2, Rect::new(40, 0, 40, 12)),
+            (3, Rect::new(40, 12, 40, 12)),
+        ];
+        let spaced = with_gaps(tiles, body, (2, 1));
+        assert_eq!(spaced[0].1, Rect::new(0, 0, 38, 24));
+        assert_eq!(spaced[1].1, Rect::new(40, 0, 40, 11));
+        assert_eq!(spaced[2].1, Rect::new(40, 12, 40, 12));
+    }
 
     #[test]
     fn floats_are_drawn_on_top_and_focus_raises_them() {

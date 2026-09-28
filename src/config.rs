@@ -56,6 +56,67 @@ impl Placement {
     }
 }
 
+/// Where a bar line sits: at the very edge of the screen over its full
+/// width, or inside the outer margin like the panes.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum BarEdge {
+    #[default]
+    Edge,
+    Inset,
+}
+
+impl BarEdge {
+    fn name(self) -> &'static str {
+        match self {
+            BarEdge::Edge => "edge",
+            BarEdge::Inset => "inset",
+        }
+    }
+
+    fn toggled(self) -> Self {
+        match self {
+            BarEdge::Edge => BarEdge::Inset,
+            BarEdge::Inset => BarEdge::Edge,
+        }
+    }
+}
+
+/// Space around and between the panes, in cells. A cell is about twice as
+/// tall as it is wide, so columns and rows are set apart: two columns look
+/// like one row.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Spacing {
+    /// Columns left and right of the panes.
+    pub outer_x: u16,
+    /// Rows above and below the panes.
+    pub outer_y: u16,
+    /// Columns between panes side by side, and before the sidebar.
+    pub gap_x: u16,
+    /// Rows between panes one above the other, and between an inset bar
+    /// and the panes.
+    pub gap_y: u16,
+    pub top_bar: BarEdge,
+    pub bottom_bar: BarEdge,
+}
+
+/// The largest spacing the settings menu steps to, in columns and rows.
+const MAX_COLUMNS: u16 = 4;
+const MAX_ROWS: u16 = 2;
+
+/// `value` one step up or down, wrapping between 0 and `max`.
+fn step_cells(value: u16, max: u16, forward: bool) -> u16 {
+    let value = value.min(max);
+    if forward {
+        if value == max { 0 } else { value + 1 }
+    } else if value == 0 {
+        max
+    } else {
+        value - 1
+    }
+}
+
 /// The elements of the bars around the panes. Elements on the same side
 /// share one line: the control bar and the workspace tabs on the left, the
 /// path on the right.
@@ -103,6 +164,7 @@ pub struct Config {
     pub theme: String,
     pub which_key: WhichKey,
     pub bars: Bars,
+    pub spacing: Spacing,
     pub sidebar: Sidebar,
     /// How to tell the user that an agent waits or finished while they
     /// looked elsewhere.
@@ -167,6 +229,7 @@ impl Default for Config {
             theme: theme::default_name(),
             which_key: WhichKey::default(),
             bars: Bars::default(),
+            spacing: Spacing::default(),
             sidebar: Sidebar::default(),
             notifications: Notifications::default(),
             commands: vec![UserCommand {
@@ -358,11 +421,59 @@ pub const SETTINGS: &[Setting] = &[
         value: |c| c.bars.path.name().to_owned(),
         step: |c, forward| c.bars.path = step_placement(c.bars.path, true, forward),
     },
+    Setting {
+        name: "Outer margin ↔",
+        value: |c| format!("{} col", c.spacing.outer_x),
+        step: |c, forward| c.spacing.outer_x = step_cells(c.spacing.outer_x, MAX_COLUMNS, forward),
+    },
+    Setting {
+        name: "Outer margin ↕",
+        value: |c| format!("{} row", c.spacing.outer_y),
+        step: |c, forward| c.spacing.outer_y = step_cells(c.spacing.outer_y, MAX_ROWS, forward),
+    },
+    Setting {
+        name: "Gap side by side",
+        value: |c| format!("{} col", c.spacing.gap_x),
+        step: |c, forward| c.spacing.gap_x = step_cells(c.spacing.gap_x, MAX_COLUMNS, forward),
+    },
+    Setting {
+        name: "Gap above/below",
+        value: |c| format!("{} row", c.spacing.gap_y),
+        step: |c, forward| c.spacing.gap_y = step_cells(c.spacing.gap_y, MAX_ROWS, forward),
+    },
+    Setting {
+        name: "Top bar",
+        value: |c| c.spacing.top_bar.name().to_owned(),
+        step: |c, _| c.spacing.top_bar = c.spacing.top_bar.toggled(),
+    },
+    Setting {
+        name: "Bottom bar",
+        value: |c| c.spacing.bottom_bar.name().to_owned(),
+        step: |c, _| c.spacing.bottom_bar = c.spacing.bottom_bar.toggled(),
+    },
 ];
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn spacing_defaults_to_none_and_parses() {
+        assert_eq!(Config::default().spacing, Spacing::default());
+        let config =
+            Config::parse("[spacing]\nouter_x = 2\ngap_y = 1\nbottom_bar = \"inset\"\n").unwrap();
+        assert_eq!(config.spacing.outer_x, 2);
+        assert_eq!(config.spacing.gap_y, 1);
+        assert_eq!(config.spacing.bottom_bar, BarEdge::Inset);
+        assert_eq!(config.spacing.top_bar, BarEdge::Edge);
+    }
+
+    #[test]
+    fn spacing_steps_wrap_around() {
+        assert_eq!(step_cells(0, 2, true), 1);
+        assert_eq!(step_cells(2, 2, true), 0);
+        assert_eq!(step_cells(0, 2, false), 2);
+    }
 
     #[test]
     fn commands_come_from_the_config() {

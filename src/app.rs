@@ -24,7 +24,9 @@ use ratatui::{Frame, Terminal, TerminalOptions, Viewport};
 
 use crate::agent::{self, AgentState};
 use crate::bindings::{self, Command, Menu};
-use crate::config::{self, Bars, Config, Notifications, Placement, SETTINGS, Side};
+use crate::config::{
+    self, BarEdge, Bars, Config, Notifications, Placement, SETTINGS, Side, Spacing,
+};
 use crate::filetree::FileTree;
 use crate::keys;
 use crate::layout::{Axis, MIN_PANE_SIZE, PaneId};
@@ -326,7 +328,7 @@ impl App {
         if let Some(e) = &config_error {
             eprintln!("config: {e}");
         }
-        let body = screen_layout(DEFAULT_SCREEN, &config.bars).body;
+        let body = screen_layout(DEFAULT_SCREEN, &config.bars, &config.spacing).body;
 
         let mut app = App {
             panes: HashMap::new(),
@@ -1573,15 +1575,21 @@ impl App {
                 bottom: None,
             };
             let (body, sidebar) = if self.sidebar_focused() {
-                split_sidebar(screen, &self.config.sidebar, true)
+                split_sidebar(screen, &self.config.sidebar, true, 0)
             } else {
                 (screen, None)
             };
             return (layout, body, sidebar);
         }
-        let layout = screen_layout(screen, &self.config.bars);
-        let (body, sidebar) =
-            split_sidebar(layout.body, &self.config.sidebar, self.sidebar_focused());
+        let spacing = &self.config.spacing;
+        crate::workspace::set_gaps(spacing.gap_x, spacing.gap_y);
+        let layout = screen_layout(screen, &self.config.bars, spacing);
+        let (body, sidebar) = split_sidebar(
+            layout.body,
+            &self.config.sidebar,
+            self.sidebar_focused(),
+            spacing.gap_x,
+        );
         (layout, body, sidebar)
     }
 
@@ -3258,7 +3266,19 @@ impl App {
             Mode::Picker => self.draw_picker(frame, body),
             Mode::Sessions(selected) => {
                 let (_, items) = self.session_items();
-                menu::draw_choices(frame, body, " ⬢ Sessions ", &items, selected);
+                menu::draw_choices(
+                    frame,
+                    body,
+                    " ⬢ Sessions ",
+                    &items,
+                    selected,
+                    &[
+                        ("↑↓", "select"),
+                        ("Enter", "or key switch"),
+                        ("r", "rename"),
+                        ("Esc", "cancel"),
+                    ],
+                );
             }
             Mode::Prefix(_) | Mode::Normal | Mode::Repeat(..) | Mode::Copy | Mode::Sidebar(_) => {}
         }
@@ -3673,22 +3693,58 @@ struct ScreenLayout {
     bottom: Option<Rect>,
 }
 
-fn screen_layout(screen: Rect, bars: &Bars) -> ScreenLayout {
-    let top = u16::from(bars.uses(Placement::Top)).min(screen.height);
-    let bottom = u16::from(bars.uses(Placement::Bottom)).min(screen.height - top);
-    let line = |y| Rect {
-        y,
-        height: 1,
-        ..screen
-    };
+fn screen_layout(screen: Rect, bars: &Bars, spacing: &Spacing) -> ScreenLayout {
+    let mut rest = screen;
+    let mut top = None;
+    let mut bottom = None;
+    // A bar at the edge takes the outermost line over the whole width...
+    let top_edge = bars.uses(Placement::Top) && spacing.top_bar == BarEdge::Edge;
+    let bottom_edge = bars.uses(Placement::Bottom) && spacing.bottom_bar == BarEdge::Edge;
+    if top_edge && rest.height > 0 {
+        top = Some(Rect { height: 1, ..rest });
+        rest.y += 1;
+        rest.height -= 1;
+    }
+    if bottom_edge && rest.height > 0 {
+        rest.height -= 1;
+        bottom = Some(Rect {
+            y: rest.bottom(),
+            height: 1,
+            ..rest
+        });
+    }
+    // ...then the margin, as long as the panes keep room for a border and
+    // a line...
+    let (x, y) = (spacing.outer_x, spacing.outer_y);
+    if rest.width > 2 * x + 2 && rest.height > 2 * y + 2 {
+        rest = Rect::new(
+            rest.x + x,
+            rest.y + y,
+            rest.width - 2 * x,
+            rest.height - 2 * y,
+        );
+    }
+    // ...and an inset bar sits inside it, a gap away from the panes.
+    let gap = |rest: Rect| spacing.gap_y.min(rest.height.saturating_sub(4) / 2);
+    if bars.uses(Placement::Top) && !top_edge && rest.height > 0 {
+        let gap = gap(rest);
+        top = Some(Rect { height: 1, ..rest });
+        rest.y += 1 + gap;
+        rest.height -= 1 + gap;
+    }
+    if bars.uses(Placement::Bottom) && !bottom_edge && rest.height > 0 {
+        let gap = gap(rest);
+        rest.height -= 1 + gap;
+        bottom = Some(Rect {
+            y: rest.bottom() + gap,
+            height: 1,
+            ..rest
+        });
+    }
     ScreenLayout {
-        top: (top > 0).then(|| line(screen.y)),
-        body: Rect {
-            y: screen.y + top,
-            height: screen.height - top - bottom,
-            ..screen
-        },
-        bottom: (bottom > 0).then(|| line(screen.bottom() - 1)),
+        top,
+        body: rest,
+        bottom,
     }
 }
 
@@ -3705,16 +3761,22 @@ fn badge_text() -> String {
 /// The panes' area and the sidebar's, if it is on and there is room for it
 /// next to panes at least as wide.
 /// A focused sidebar is shown even when it is turned off.
-fn split_sidebar(body: Rect, config: &config::Sidebar, focused: bool) -> (Rect, Option<Rect>) {
+/// `gap` columns keep the sidebar apart from the panes.
+fn split_sidebar(
+    body: Rect,
+    config: &config::Sidebar,
+    focused: bool,
+    gap: u16,
+) -> (Rect, Option<Rect>) {
     let width = sidebar::WIDTH;
-    if !(config.enabled || focused) || body.width < 2 * width {
+    if !(config.enabled || focused) || body.width < 2 * width + gap {
         return (body, None);
     }
-    let rest = body.width - width;
+    let rest = body.width - width - gap;
     match config.side {
         Side::Left => (
             Rect {
-                x: body.x + width,
+                x: body.x + width + gap,
                 width: rest,
                 ..body
             },
@@ -3726,7 +3788,7 @@ fn split_sidebar(body: Rect, config: &config::Sidebar, focused: bool) -> (Rect, 
                 ..body
             },
             Some(Rect {
-                x: body.x + rest,
+                x: body.x + rest + gap,
                 width,
                 ..body
             }),
@@ -4018,9 +4080,47 @@ mod tests {
     use super::*;
 
     #[test]
+    fn edge_bars_stay_at_the_edge_around_the_margin() {
+        let screen = Rect::new(0, 0, 80, 24);
+        let spacing = Spacing {
+            outer_x: 2,
+            outer_y: 1,
+            ..Spacing::default()
+        };
+        let layout = screen_layout(screen, &Bars::default(), &spacing);
+        assert_eq!(layout.bottom, Some(Rect::new(0, 23, 80, 1)));
+        assert_eq!(layout.body, Rect::new(2, 1, 76, 21));
+    }
+
+    #[test]
+    fn inset_bars_move_in_with_the_margin_a_gap_from_the_panes() {
+        let screen = Rect::new(0, 0, 80, 24);
+        let spacing = Spacing {
+            outer_x: 2,
+            outer_y: 1,
+            gap_y: 1,
+            bottom_bar: BarEdge::Inset,
+            ..Spacing::default()
+        };
+        let layout = screen_layout(screen, &Bars::default(), &spacing);
+        assert_eq!(layout.bottom, Some(Rect::new(2, 22, 76, 1)));
+        assert_eq!(layout.body, Rect::new(2, 1, 76, 20));
+    }
+
+    #[test]
+    fn sidebar_keeps_the_gap_from_the_panes() {
+        let body = Rect::new(0, 0, 100, 20);
+        let config = config::Sidebar::default();
+        let (panes, side) = split_sidebar(body, &config, false, 2);
+        let side = side.unwrap();
+        assert_eq!(panes.right() + 2, side.x);
+        assert_eq!(side.right(), body.right());
+    }
+
+    #[test]
     fn bars_take_lines_on_their_side() {
         let screen = Rect::new(0, 0, 80, 24);
-        let layout = screen_layout(screen, &Bars::default());
+        let layout = screen_layout(screen, &Bars::default(), &Spacing::default());
         assert_eq!(layout.top, None);
         assert_eq!(layout.body, Rect::new(0, 0, 80, 23));
         assert_eq!(layout.bottom, Some(Rect::new(0, 23, 80, 1)));
@@ -4030,7 +4130,7 @@ mod tests {
             tabs: Placement::Top,
             path: Placement::Off,
         };
-        let layout = screen_layout(screen, &split);
+        let layout = screen_layout(screen, &split, &Spacing::default());
         assert_eq!(layout.top, Some(Rect::new(0, 0, 80, 1)));
         assert_eq!(layout.body, Rect::new(0, 1, 80, 22));
         assert_eq!(layout.bottom, Some(Rect::new(0, 23, 80, 1)));
@@ -4040,22 +4140,22 @@ mod tests {
     fn sidebar_takes_its_side_when_there_is_room() {
         let body = Rect::new(0, 1, 120, 30);
         let mut config = config::Sidebar::default();
-        let (panes, side) = split_sidebar(body, &config, false);
+        let (panes, side) = split_sidebar(body, &config, false, 0);
         assert_eq!(panes, Rect::new(0, 1, 90, 30));
         assert_eq!(side, Some(Rect::new(90, 1, 30, 30)));
 
         config.side = Side::Left;
-        let (panes, side) = split_sidebar(body, &config, false);
+        let (panes, side) = split_sidebar(body, &config, false, 0);
         assert_eq!(panes, Rect::new(30, 1, 90, 30));
         assert_eq!(side, Some(Rect::new(0, 1, 30, 30)));
 
         assert_eq!(
-            split_sidebar(Rect::new(0, 0, 50, 20), &config, false).1,
+            split_sidebar(Rect::new(0, 0, 50, 20), &config, false, 0).1,
             None
         );
         config.enabled = false;
-        assert_eq!(split_sidebar(body, &config, false), (body, None));
-        assert!(split_sidebar(body, &config, true).1.is_some());
+        assert_eq!(split_sidebar(body, &config, false, 0), (body, None));
+        assert!(split_sidebar(body, &config, true, 0).1.is_some());
     }
 
     #[test]

@@ -226,7 +226,20 @@ side = "right"      # "left" or "right"
 control = "bottom"  # hivemux badge, mode and hints: "top" or "bottom"
 tabs = "bottom"     # workspace tabs: "top", "bottom" or "off"
 path = "bottom"     # directory of the focused pane: "top", "bottom" or "off"
+
+[spacing]           # in cells, all 0 by default; a cell is about twice as tall as wide
+outer_x = 0         # columns left and right of the panes
+outer_y = 0         # rows above and below the panes
+gap_x = 0           # columns between panes side by side, and before the sidebar
+gap_y = 0           # rows between panes one above the other
+top_bar = "edge"    # "edge": the outermost line, full width; "inset": inside the margin
+bottom_bar = "edge"
 ```
+
+Two columns look about as wide as one row is tall, so `outer_x = 2, outer_y = 1, gap_x = 2,
+gap_y = 1` gives even spacing all round. hivemux spaces in whole cells, the terminal's own
+padding (e.g. Ghostty's `window-padding-x/y`) comes on top: a bar on the `edge` only touches the
+window's edge when that padding is 0.
 
 Themes: `hivemux` is honey on your terminal's colours. `omarchy` follows the current Omarchy theme
 and changes with it. Any installed Omarchy theme (`catppuccin`, `gruvbox`, `tokyo-night`, …) can be

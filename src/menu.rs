@@ -230,16 +230,29 @@ pub struct MenuItem {
 
 /// The quit menu in the middle of `area`, `selected` highlighted.
 pub fn draw_quit_menu(frame: &mut Frame, area: Rect, items: &[MenuItem], selected: usize) {
-    draw_choices(frame, area, " ⬢ Quit hivemux? ", items, selected);
+    draw_choices(
+        frame,
+        area,
+        " ⬢ Quit hivemux? ",
+        items,
+        selected,
+        &[
+            ("↑↓", "select"),
+            ("Enter", "or letter choose"),
+            ("Esc", "cancel"),
+        ],
+    );
 }
 
-/// A menu of `items` in the middle of `area`, `selected` highlighted.
+/// A menu of `items` in the middle of `area`, `selected` highlighted, with
+/// every key it takes besides the items' own listed below as `keys`.
 pub fn draw_choices(
     frame: &mut Frame,
     area: Rect,
     title: &str,
     items: &[MenuItem],
     selected: usize,
+    keys: &[(&str, &str)],
 ) {
     let area = inset(area);
     let title_width = items
@@ -284,14 +297,7 @@ pub fn draw_choices(
         lines.push(line);
     }
     lines.push(Line::default());
-    lines.push(Line::from(vec![
-        Span::styled("↑↓", key_style()),
-        Span::raw(" select   "),
-        Span::styled("Enter", key_style()),
-        Span::raw(" or letter choose   "),
-        Span::styled("Esc", key_style()),
-        Span::raw(" cancel"),
-    ]));
+    lines.push(key_line(keys));
 
     let width = lines.iter().map(Line::width).max().unwrap_or(0) as u16 + 6;
     let height = lines.len() as u16 + 2;
@@ -382,7 +388,24 @@ pub fn draw_settings(
         width,
         height,
     );
-    draw_box(frame, popup, " ⬢ Settings ".into(), 2, lines);
+    // On a short screen the list scrolls so the selected setting shows.
+    let rows = height.saturating_sub(2);
+    let overflow = (lines.len() as u16).saturating_sub(rows);
+    let scroll = (selected as u16 + 2).saturating_sub(rows).min(overflow);
+    draw_box_scrolled(frame, popup, " ⬢ Settings ".into(), 2, lines, scroll);
+}
+
+/// A row of keys with what they do, like the bottom line of a menu.
+fn key_line(keys: &[(&str, &str)]) -> Line<'static> {
+    let mut spans = Vec::new();
+    for (i, (key, what)) in keys.iter().enumerate() {
+        if i > 0 {
+            spans.push(Span::raw("   "));
+        }
+        spans.push(Span::styled(key.to_string(), key_style()));
+        spans.push(Span::raw(format!(" {what}")));
+    }
+    Line::from(spans)
 }
 
 fn key_style() -> Style {
@@ -497,6 +520,22 @@ mod tests {
     }
 
     #[test]
+    fn choices_list_the_keys_they_take() {
+        let items = [MenuItem {
+            key: '1',
+            title: "default".into(),
+            hint: String::new(),
+            danger: false,
+        }];
+        let keys = [("Enter", "switch"), ("r", "rename"), ("Esc", "cancel")];
+        let screen = render(80, 20, |f, a| {
+            draw_choices(f, a, " Sessions ", &items, 0, &keys)
+        });
+        let footer = screen.split_once("default").expect("item").1;
+        assert!(footer.contains("r rename") && footer.contains("Esc cancel"));
+    }
+
+    #[test]
     fn which_key_fits_side_by_side_on_a_wide_screen() {
         let screen = render(120, 30, |f, a| {
             draw_which_key(f, a, Side::Right, Menu::Root, &[])
@@ -562,7 +601,7 @@ mod tests {
     #[test]
     fn settings_show_every_setting_with_its_value() {
         let config = Config::default();
-        let screen = render(80, 20, |f, a| {
+        let screen = render(80, 30, |f, a| {
             draw_settings(f, a, &config, 0, Some("saved"))
         });
         for setting in SETTINGS {
@@ -570,6 +609,14 @@ mod tests {
             assert!(screen.contains(&(setting.value)(&config)));
         }
         assert!(screen.contains("saved"));
+    }
+
+    #[test]
+    fn settings_scroll_to_the_selected_one_on_a_short_screen() {
+        let config = Config::default();
+        let last = SETTINGS.len() - 1;
+        let screen = render(80, 12, |f, a| draw_settings(f, a, &config, last, None));
+        assert!(screen.contains(SETTINGS[last].name));
     }
 
     #[test]
