@@ -55,6 +55,22 @@ enum Mode {
     Confirm(Action),
     /// The key reference is shown, the next key closes it.
     Help,
+    /// The quit menu is open with the given entry selected.
+    Menu(usize),
+}
+
+/// The entries of the quit menu, in order.
+const MENU: [(char, MenuEntry); 3] = [
+    ('d', MenuEntry::Detach),
+    ('x', MenuEntry::ClosePane),
+    ('Q', MenuEntry::EndSession),
+];
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum MenuEntry {
+    Detach,
+    ClosePane,
+    EndSession,
 }
 
 /// Actions that destroy something and are therefore confirmed first.
@@ -319,6 +335,10 @@ impl App {
                 self.mode = Mode::Normal;
                 Ok(())
             }
+            Mode::Menu(selected) => {
+                self.menu_key(key, selected);
+                Ok(())
+            }
             Mode::Confirm(action) => {
                 self.mode = Mode::Normal;
                 if matches!(key.code, KeyCode::Char('y' | 'Y')) {
@@ -372,6 +392,7 @@ impl App {
             Command::Detach => self.detach(),
             Command::Quit => self.mode = Mode::Confirm(Action::KillServer),
             Command::Help => self.mode = Mode::Help,
+            Command::SessionMenu => self.mode = Mode::Menu(0),
             // Prefix twice sends the prefix key itself to the pane.
             Command::SendPrefix => {
                 if let Some(pane) = self.panes.get_mut(&self.focus) {
@@ -384,6 +405,36 @@ impl App {
             self.mode = Mode::Repeat(Instant::now() + REPEAT_TIME);
         }
         Ok(())
+    }
+
+    /// Moves through the quit menu with arrows or j/k and picks an entry
+    /// with Enter or its letter. Choosing an entry there is already a
+    /// deliberate decision, so it is not confirmed again.
+    fn menu_key(&mut self, key: KeyEvent, selected: usize) {
+        let pick = match key.code {
+            KeyCode::Esc | KeyCode::Char('q') => {
+                self.mode = Mode::Normal;
+                return;
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                self.mode = Mode::Menu((selected + MENU.len() - 1) % MENU.len());
+                return;
+            }
+            KeyCode::Down | KeyCode::Char('j') | KeyCode::Tab => {
+                self.mode = Mode::Menu((selected + 1) % MENU.len());
+                return;
+            }
+            KeyCode::Enter => Some(MENU[selected].1),
+            KeyCode::Char(c) => MENU.iter().find(|(k, _)| *k == c).map(|&(_, e)| e),
+            _ => None,
+        };
+        let Some(entry) = pick else { return };
+        self.mode = Mode::Normal;
+        match entry {
+            MenuEntry::Detach => self.detach(),
+            MenuEntry::ClosePane => self.close(self.focus),
+            MenuEntry::EndSession => self.quit = true,
+        }
     }
 
     fn perform(&mut self, action: Action) {
@@ -497,7 +548,7 @@ impl App {
             let cursor = view.cursor(inner);
             frame.render_widget(view, inner);
             if focused
-                && !matches!(self.mode, Mode::Confirm(_) | Mode::Help)
+                && !matches!(self.mode, Mode::Confirm(_) | Mode::Help | Mode::Menu(_))
                 && let Some(position) = cursor
             {
                 frame.set_cursor_position(position);
@@ -509,9 +560,39 @@ impl App {
         match self.mode {
             Mode::Prefix => menu::draw_which_key(frame, body),
             Mode::Help => menu::draw_help(frame, body),
+            Mode::Menu(selected) => menu::draw_quit_menu(frame, body, &self.menu_items(), selected),
             Mode::Confirm(action) => self.draw_confirm(frame, body, action),
             Mode::Normal | Mode::Repeat(_) => {}
         }
+    }
+
+    fn menu_items(&self) -> Vec<menu::MenuItem> {
+        let shells = self.panes.len();
+        MENU.iter()
+            .map(|&(key, entry)| match entry {
+                MenuEntry::Detach => menu::MenuItem {
+                    key,
+                    title: "Detach".into(),
+                    hint: "shells keep running, `hivemux` brings you back".into(),
+                    danger: false,
+                },
+                MenuEntry::ClosePane => menu::MenuItem {
+                    key,
+                    title: format!("Close pane {}", self.focus),
+                    hint: "ends the program running in it".into(),
+                    danger: true,
+                },
+                MenuEntry::EndSession => menu::MenuItem {
+                    key,
+                    title: "End session".into(),
+                    hint: format!(
+                        "closes all {shells} {}",
+                        if shells == 1 { "shell" } else { "shells" }
+                    ),
+                    danger: true,
+                },
+            })
+            .collect()
     }
 
     /// A warning box in the middle of the screen, asking to confirm `action`.
@@ -582,6 +663,13 @@ impl App {
                 spans.push(Span::styled(" PREFIX ", badge));
                 spans.push(Span::styled(
                     "  ? all keys · Esc cancel",
+                    Style::new().fg(HONEY),
+                ));
+            }
+            Mode::Menu(_) => {
+                spans.push(Span::styled(" QUIT ", badge));
+                spans.push(Span::styled(
+                    "  ↑↓ select · Enter or letter choose · Esc cancel",
                     Style::new().fg(HONEY),
                 ));
             }

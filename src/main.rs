@@ -21,8 +21,8 @@ Commands:
   keys          list the key bindings
   help          show this help
 
-Inside hivemux, press Ctrl+B then q (or d) to detach. The shells keep running.
-Ctrl+B then Q ends the session and every shell in it, after asking.";
+Inside hivemux, Ctrl+B then q opens the quit menu: detach, close the pane or end the
+session. Ctrl+B then d detaches right away, the shells keep running.";
 
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();

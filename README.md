@@ -51,7 +51,8 @@ a time, attaching from a second terminal detaches the first.
 | `Ctrl+B` `←↑↓→` | Focus the pane in that direction |
 | `Ctrl+B` `o` | Focus the next pane |
 | `Ctrl+B` `Ctrl+←↑↓→` | Resize by one cell (`Alt` for five) |
-| `Ctrl+B` `q` or `d` | Detach, the shells keep running |
+| `Ctrl+B` `q` | Quit menu: detach, close the pane or end the session |
+| `Ctrl+B` `d` | Detach, the shells keep running |
 | `Ctrl+B` `Q` | Quit: end the session and every shell in it (asks first) |
 | `Ctrl+B` `?` | Show all keys |
 | `Ctrl+B` `Ctrl+B` | Send `Ctrl+B` to the shell |

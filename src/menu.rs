@@ -108,6 +108,78 @@ fn groups(max_width: usize) -> Vec<Line<'static>> {
     }
 }
 
+/// An entry of the quit menu.
+pub struct MenuItem {
+    pub key: char,
+    pub title: String,
+    pub hint: String,
+    /// Destroys something, shown in red.
+    pub danger: bool,
+}
+
+/// The quit menu in the middle of `area`, `selected` highlighted.
+pub fn draw_quit_menu(frame: &mut Frame, area: Rect, items: &[MenuItem], selected: usize) {
+    let area = inset(area);
+    let title_width = items
+        .iter()
+        .map(|i| i.title.chars().count())
+        .max()
+        .unwrap_or(0);
+    let hint_width = items
+        .iter()
+        .map(|i| i.hint.chars().count())
+        .max()
+        .unwrap_or(0);
+    let row_width = 3 + GAP + title_width + GAP + hint_width;
+
+    let mut lines = Vec::new();
+    for (i, item) in items.iter().enumerate() {
+        let color = if item.danger { Color::LightRed } else { HONEY };
+        let title_pad = title_width - item.title.chars().count() + GAP;
+        let mut spans = vec![
+            Span::styled(
+                format!(" {} ", item.key),
+                Style::new().fg(color).add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(" ".repeat(GAP)),
+            Span::styled(
+                item.title.clone(),
+                Style::new().fg(color).add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(" ".repeat(title_pad)),
+            Span::styled(item.hint.clone(), Style::new().add_modifier(Modifier::DIM)),
+        ];
+        let used: usize = spans.iter().map(|s| s.content.chars().count()).sum();
+        spans.push(Span::raw(" ".repeat(row_width.saturating_sub(used))));
+        let mut line = Line::from(spans);
+        if i == selected {
+            line = line.patch_style(Style::new().bg(Color::DarkGray));
+        }
+        lines.push(line);
+    }
+    lines.push(Line::default());
+    lines.push(Line::from(vec![
+        Span::styled("↑↓", key_style()),
+        Span::raw(" select   "),
+        Span::styled("Enter", key_style()),
+        Span::raw(" or letter choose   "),
+        Span::styled("Esc", key_style()),
+        Span::raw(" cancel"),
+    ]));
+
+    let width = lines.iter().map(Line::width).max().unwrap_or(0) as u16 + 6;
+    let height = lines.len() as u16 + 2;
+    let width = width.min(area.width);
+    let height = height.min(area.height);
+    let popup = Rect::new(
+        area.x + (area.width - width) / 2,
+        area.y + (area.height - height) / 2,
+        width,
+        height,
+    );
+    draw_box(frame, popup, " ⬢ Quit hivemux? ".into(), 2, lines);
+}
+
 fn key_style() -> Style {
     Style::new().fg(HONEY).add_modifier(Modifier::BOLD)
 }

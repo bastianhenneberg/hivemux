@@ -19,6 +19,7 @@ pub enum Command {
     Focus(Direction),
     Resize(Direction, u16),
     Detach,
+    SessionMenu,
     Quit,
     Help,
     SendPrefix,
@@ -160,13 +161,16 @@ pub const BINDINGS: &[Binding] = &[
         ],
     },
     Binding {
-        label: "q d",
+        label: "q",
+        description: "quit menu",
+        group: Group::Session,
+        keys: &[(Key::plain(Char('q')), C::SessionMenu)],
+    },
+    Binding {
+        label: "d",
         description: "detach",
         group: Group::Session,
-        keys: &[
-            (Key::plain(Char('q')), C::Detach),
-            (Key::plain(Char('d')), C::Detach),
-        ],
+        keys: &[(Key::plain(Char('d')), C::Detach)],
     },
     Binding {
         label: "Q",
@@ -272,7 +276,7 @@ mod tests {
         assert_eq!(lookup(event(Char('Q'), KeyModifiers::SHIFT)), Some(C::Quit));
         assert_eq!(
             lookup(event(Char('q'), KeyModifiers::NONE)),
-            Some(C::Detach)
+            Some(C::SessionMenu)
         );
         assert_eq!(lookup(event(Char('x'), KeyModifiers::CONTROL)), None);
     }
