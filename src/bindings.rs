@@ -31,6 +31,7 @@ pub enum Command {
     NextFloat,
     RenamePane,
     Sessions,
+    Hives,
     PickPane,
     ReloadConfig,
     ScrollbackEditor,
@@ -385,6 +386,12 @@ pub const BINDINGS: &[Binding] = &[
         description: "sessions…",
         group: Group::Session,
         keys: &[(Key::plain(Char('S')), C::Sessions)],
+    },
+    Binding {
+        label: "H",
+        description: "hives…",
+        group: Group::Session,
+        keys: &[(Key::plain(Char('H')), C::Hives)],
     },
     Binding {
         label: "c",

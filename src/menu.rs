@@ -297,7 +297,8 @@ pub fn draw_choices(
         lines.push(line);
     }
     lines.push(Line::default());
-    lines.push(key_line(keys));
+    // Border and two columns of padding on each side.
+    lines.extend(key_lines(keys, usize::from(area.width).saturating_sub(6)));
 
     let width = lines.iter().map(Line::width).max().unwrap_or(0) as u16 + 6;
     let height = lines.len() as u16 + 2;
@@ -395,17 +396,28 @@ pub fn draw_settings(
     draw_box_scrolled(frame, popup, " ⬢ Settings ".into(), 2, lines, scroll);
 }
 
-/// A row of keys with what they do, like the bottom line of a menu.
-fn key_line(keys: &[(&str, &str)]) -> Line<'static> {
-    let mut spans = Vec::new();
-    for (i, (key, what)) in keys.iter().enumerate() {
-        if i > 0 {
+/// Keys with what they do, like the bottom of a menu, in rows no wider
+/// than `max_width`.
+fn key_lines(keys: &[(&str, &str)], max_width: usize) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    let mut width = 0;
+    for (key, what) in keys {
+        let entry = key.chars().count() + 1 + what.chars().count();
+        if width > 0 && width + 3 + entry > max_width {
+            lines.push(Line::from(std::mem::take(&mut spans)));
+            width = 0;
+        }
+        if width > 0 {
             spans.push(Span::raw("   "));
+            width += 3;
         }
         spans.push(Span::styled(key.to_string(), key_style()));
         spans.push(Span::raw(format!(" {what}")));
+        width += entry;
     }
-    Line::from(spans)
+    lines.push(Line::from(spans));
+    lines
 }
 
 fn key_style() -> Style {
@@ -533,6 +545,15 @@ mod tests {
         });
         let footer = screen.split_once("default").expect("item").1;
         assert!(footer.contains("r rename") && footer.contains("Esc cancel"));
+    }
+
+    #[test]
+    fn menu_keys_wrap_instead_of_being_cut_off() {
+        let keys = [("Enter", "bring back"), ("x", "delete"), ("Esc", "cancel")];
+        let lines = key_lines(&keys, 24);
+        assert_eq!(lines.len(), 2);
+        assert!(lines.iter().all(|l| l.width() <= 24));
+        assert_eq!(key_lines(&keys, 80).len(), 1);
     }
 
     #[test]

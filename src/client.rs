@@ -139,14 +139,18 @@ fn caps() -> Caps {
 
 /// Tells a running server to shut down.
 pub fn kill_server() -> Result<()> {
-    let path = socket_path()?;
-    let mut stream = UnixStream::connect(&path).context("no hivemux server running")?;
+    kill_server_at(&socket_path()?)
+}
+
+/// Ends the server at `path` and waits until it is gone.
+pub fn kill_server_at(path: &Path) -> Result<()> {
+    let mut stream = UnixStream::connect(path).context("no hivemux server running")?;
     ClientMsg::KillServer.write_to(&mut stream)?;
     // Wait until the server has closed every shell and let go of the
     // socket, so `hivemux kill-server && hivemux` starts a new one instead
     // of reaching the old one on its way out.
     for _ in 0..150 {
-        if UnixStream::connect(&path).is_err() {
+        if UnixStream::connect(path).is_err() {
             return Ok(());
         }
         thread::sleep(Duration::from_millis(20));
@@ -197,17 +201,42 @@ fn session(mut stream: UnixStream, writer: &Writer) -> Result<Outcome> {
     }
 }
 
-/// The layouts of every running session, for a save file.
+/// The layouts of every running session, for a hive.
 pub fn snapshot_all() -> Result<crate::persist::Hive> {
+    snapshot_all_but(None)
+}
+
+/// Like `snapshot_all`, with `own` standing in for the session of that name:
+/// a server cannot ask itself over its socket while it handles a key.
+pub fn snapshot_all_but(
+    own: Option<(&str, crate::persist::Saved)>,
+) -> Result<crate::persist::Hive> {
     let mut hive = crate::persist::Hive::default();
     for name in crate::protocol::sessions() {
-        let reply = request_at(&session_socket(&name)?, Request::Snapshot)
-            .with_context(|| format!("session {name}"))?;
+        let layout = match &own {
+            Some((own_name, saved)) if *own_name == name => saved.clone(),
+            _ => {
+                let reply = request_at(&session_socket(&name)?, Request::Snapshot)
+                    .with_context(|| format!("session {name}"))?;
+                serde_json::from_value(reply)?
+            }
+        };
         hive.sessions.insert(
             name,
             crate::persist::HiveSession {
                 saved_at: crate::persist::now(),
-                layout: serde_json::from_value(reply)?,
+                layout,
+            },
+        );
+    }
+    if let Some((name, saved)) = own
+        && !hive.sessions.contains_key(name)
+    {
+        hive.sessions.insert(
+            name.to_owned(),
+            crate::persist::HiveSession {
+                saved_at: crate::persist::now(),
+                layout: saved,
             },
         );
     }
@@ -221,7 +250,7 @@ pub fn restore_hive(name: &str) -> Result<Vec<String>> {
         bail!("restoring sessions needs their names, unset HIVEMUX_SOCKET");
     }
     let Some(hive) = crate::persist::load_hive(name)? else {
-        bail!("there is no save called {name}");
+        bail!("there is no hive called {name}");
     };
     let mut started = Vec::new();
     for (session, saved) in hive.sessions {

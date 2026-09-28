@@ -181,6 +181,53 @@ pub fn keep_in_last(session: &str, layout: Saved) -> Result<()> {
     Ok(())
 }
 
+/// A hive as its menu lists it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HiveInfo {
+    pub name: String,
+    pub sessions: Vec<String>,
+    /// When its newest session was saved, in seconds since 1970.
+    pub saved_at: u64,
+}
+
+/// Every hive, `last` first, then by name. Files that cannot be read are
+/// left out.
+pub fn hive_infos() -> Vec<HiveInfo> {
+    let mut infos: Vec<HiveInfo> = saves()
+        .into_iter()
+        .filter_map(|name| {
+            let hive = load_hive(&name).ok()??;
+            Some(HiveInfo {
+                saved_at: hive
+                    .sessions
+                    .values()
+                    .map(|s| s.saved_at)
+                    .max()
+                    .unwrap_or(0),
+                sessions: hive.sessions.into_keys().collect(),
+                name,
+            })
+        })
+        .collect();
+    infos.sort_by_key(|info| (info.name != LAST, info.name.clone()));
+    infos
+}
+
+pub fn delete_hive(name: &str) -> Result<()> {
+    let path = save_path(name)?;
+    fs::remove_file(&path).with_context(|| format!("there is no hive called {name}"))
+}
+
+/// Renames hive `old` to `name`, never over another hive.
+pub fn rename_hive(old: &str, name: &str) -> Result<()> {
+    let from = save_path(old)?;
+    let to = save_path(name)?;
+    if to.exists() {
+        anyhow::bail!("there is a hive called {name} already");
+    }
+    fs::rename(&from, &to).with_context(|| format!("there is no hive called {old}"))
+}
+
 /// The save files by name.
 pub fn saves() -> Vec<String> {
     let Ok(entries) = saves_dir().and_then(|dir| Ok(fs::read_dir(dir)?)) else {
@@ -318,7 +365,7 @@ mod tests {
     }
 
     #[test]
-    fn last_collects_sessions_that_ended() {
+    fn hives_collect_sessions_and_are_managed() {
         let dir = std::env::temp_dir().join(format!("hivemux-saves-{}", std::process::id()));
         // SAFETY: the only test that sets HIVEMUX_STATE.
         unsafe { std::env::set_var("HIVEMUX_STATE", dir.join("state.json")) };
@@ -330,6 +377,27 @@ mod tests {
         assert_eq!(hive.sessions["work"].layout, sample());
         assert_eq!(saves(), ["last"]);
         assert!(save_path("../evil").is_err());
+
+        // Hives are listed with `last` first, renamed and deleted.
+        let mut hive = Hive::default();
+        hive.sessions.insert(
+            "api".into(),
+            HiveSession {
+                saved_at: 7,
+                layout: sample(),
+            },
+        );
+        write_hive("alpha", &hive).unwrap();
+        let infos = hive_infos();
+        let names: Vec<&str> = infos.iter().map(|i| i.name.as_str()).collect();
+        assert_eq!(names, ["last", "alpha"]);
+        assert_eq!(infos[1].sessions, ["api"]);
+        assert_eq!(infos[1].saved_at, 7);
+        assert!(rename_hive("alpha", "last").is_err());
+        rename_hive("alpha", "beta").unwrap();
+        delete_hive("beta").unwrap();
+        assert!(delete_hive("beta").is_err());
+        assert_eq!(saves(), ["last"]);
         unsafe { std::env::remove_var("HIVEMUX_STATE") };
         let _ = fs::remove_dir_all(dir);
     }

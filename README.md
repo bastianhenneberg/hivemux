@@ -15,6 +15,7 @@ the agents running in its panes: working, blocked, or idle.
 - **Server/client architecture**: detach and reattach without stopping work
 - **Agent-aware**: every pane is marked working, blocked, or idle
 - **Socket API** so agents and scripts can drive hivemux
+- **Hives**: save several sessions together under a name and bring the whole group back later
 
 Inspired by [TUIOS](https://github.com/Gaurav-Gosain/tuios) and [herdr](https://github.com/herdrdev/herdr).
 
@@ -47,8 +48,9 @@ a time, attaching from a second terminal detaches the first.
 
 Sessions are separate servers with their own panes, socket and saved layout. `hivemux -s NAME`
 (or `attach -t NAME`) picks one, `Ctrl+B S` switches between them without leaving the terminal,
-and named sessions show their name in the control bar. `r` in that menu, or
-`hivemux rename-session NAME` (`-s OLD` for another one), renames a session while it runs.
+and named sessions show their name in the control bar. In that menu `n` starts a new session,
+`x` ends the selected one, `r` renames it (like `hivemux rename-session NAME`, `-s OLD` for
+another one), `s` saves all running sessions as a hive and `h` opens the hives.
 
 | Key | Action |
 |---|---|
@@ -79,7 +81,8 @@ and named sessions show their name in the control bar. `r` in that menu, or
 | `Ctrl+B` `b` | Show or hide the sidebar |
 | `Ctrl+B` `e` | Into the sidebar: `j`/`k` move, `Enter` go, `r` name, `x` close, `Esc` back |
 | `Ctrl+B` `F` | Focus mode: only the focused pane, no bars, sidebar or borders; again to leave |
-| `Ctrl+B` `S` | Sessions: switch to another one or start a new one |
+| `Ctrl+B` `S` | Sessions: switch, start, end, rename, save as a hive |
+| `Ctrl+B` `H` | Hives: bring back, save, update, rename or delete saved groups of sessions |
 | `Ctrl+B` `,` | Settings |
 | `Ctrl+B` `R` | Reload the config file |
 | `Ctrl+B` `?` | Show all keys |
@@ -167,12 +170,33 @@ Codex sessions known from the hooks are resumed (`claude --resume <id>`). Proces
 contents cannot survive a restart. Ending the session on purpose (`Ctrl+B Q`, `kill-server`, or
 exiting the last shell) deletes the file.
 
-Save files hold the layouts of several sessions at once, like tmux-resurrect. Every session
-that ends on purpose (`Ctrl+B Q`, `kill-server`) puts its layout into the save `last`, so
-`hivemux restore` brings back everything that was open, each session as its own server again;
-`Ctrl+B S` offers the same as *restore last save*. `hivemux save NAME` keeps the sessions
-running now under a name of your own, `hivemux restore NAME` starts them, `hivemux restore
---list` shows what there is. Sessions already running are left alone. The files live in
+## Hives
+
+A hive is a group of sessions saved together under a name: their workspaces, splits, floating
+panes and directories. `Ctrl+B H` opens the hives, and every key it takes is listed in it:
+
+| Key | Action |
+|---|---|
+| `Enter` or digit | Bring the hive back: start each of its sessions that does not run |
+| `s` | Save the running sessions as a new hive |
+| `u` | Update the selected hive with the sessions running now (asks first) |
+| `r` | Rename the hive |
+| `x` | Delete the hive (asks first), running sessions keep running |
+
+Every session that ends on purpose (`Ctrl+B Q`, `x` in the sessions menu, `kill-server`) puts
+its layout into the hive `last`, so bringing `last` back reopens everything that was open, each
+session as its own server again. Sessions already running are left alone, and a running
+session is marked with ● in the list.
+
+```bash
+hivemux hive save work       # the running sessions as the hive `work`
+hivemux hive ls              # every hive with its sessions and age
+hivemux hive restore work    # start what of `work` does not run
+hivemux hive rename work api
+hivemux hive rm api
+```
+
+`hivemux save` and `hivemux restore` are short for `hive save` and `hive restore`. Hives live in
 `~/.local/state/hivemux/saves/`, plain JSON, easy to copy or back up.
 
 ## Images

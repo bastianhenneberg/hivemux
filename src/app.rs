@@ -89,6 +89,8 @@ enum Mode {
     Picker,
     /// The session switcher is open with the given entry selected.
     Sessions(usize),
+    /// The hives menu is open with the given hive selected.
+    Hives(usize),
 }
 
 /// The pane picker: every pane in every workspace, filtered by what is
@@ -124,6 +126,10 @@ enum PromptFor {
     },
     /// The name of a session to start and switch to.
     NewSession,
+    /// The name to save the running sessions as a hive under.
+    SaveHive,
+    /// A new name for the hive called this.
+    RenameHive(String),
 }
 
 /// A mouse drag in progress.
@@ -175,6 +181,12 @@ enum MenuEntry {
 enum Action {
     ClosePane(PaneId),
     KillServer,
+    /// End the session named in `App::confirm_target`.
+    EndSession,
+    /// Delete the hive named in `App::confirm_target`.
+    DeleteHive,
+    /// Save the running sessions over the hive named in `App::confirm_target`.
+    OverwriteHive,
 }
 
 /// The attached client. Rendering goes through a ratatui terminal whose
@@ -297,6 +309,9 @@ pub struct App {
     /// A short message for the control bar, e.g. what was copied. Cleared by
     /// the next key.
     flash: Option<String>,
+    /// The session or hive a confirmed `Action` is about, by name: a list
+    /// index could point elsewhere by the time `y` is pressed.
+    confirm_target: Option<String>,
     prompt: Option<Prompt>,
     picker: Option<Picker>,
     /// The last copy mode search and its direction, for n and N.
@@ -368,6 +383,7 @@ impl App {
             selection: None,
             copy: None,
             flash: None,
+            confirm_target: None,
             prompt: None,
             picker: None,
             search: None,
@@ -1359,11 +1375,16 @@ impl App {
                 self.sessions_key(key, selected);
                 Ok(())
             }
+            Mode::Hives(selected) => {
+                self.hives_key(key, selected);
+                Ok(())
+            }
             Mode::Confirm(action) => {
                 self.mode = Mode::Normal;
                 if matches!(key.code, KeyCode::Char('y' | 'Y')) {
                     self.perform(action);
                 }
+                self.confirm_target = None;
                 Ok(())
             }
             Mode::Repeat(until, menu)
@@ -1448,6 +1469,7 @@ impl App {
                     .unwrap_or(0);
                 self.mode = Mode::Sessions(selected);
             }
+            Command::Hives => self.mode = Mode::Hives(0),
             Command::PickPane => {
                 self.picker = Some(Picker {
                     query: String::new(),
@@ -2220,15 +2242,44 @@ impl App {
             hint: "`hivemux -s NAME` does the same".into(),
             danger: false,
         });
-        if let Some(hint) = restorable() {
-            items.push(menu::MenuItem {
-                key: 'L',
-                title: "restore last save".into(),
-                hint,
-                danger: false,
-            });
-        }
         (names, items)
+    }
+
+    /// The hives menu's entries: every hive with its sessions and age.
+    fn hive_items(&self) -> (Vec<String>, Vec<menu::MenuItem>) {
+        let infos = persist::hive_infos();
+        let running = protocol::sessions();
+        let items = infos
+            .iter()
+            .enumerate()
+            .map(|(i, info)| {
+                let age = persist::now().saturating_sub(info.saved_at);
+                let age = crate::sidebar::age(Duration::from_secs(age));
+                let sessions: Vec<String> = info
+                    .sessions
+                    .iter()
+                    .map(|s| {
+                        if running.contains(s) {
+                            format!("{s}●")
+                        } else {
+                            s.clone()
+                        }
+                    })
+                    .collect();
+                let auto = if info.name == persist::LAST {
+                    " · ended sessions"
+                } else {
+                    ""
+                };
+                menu::MenuItem {
+                    key: char::from_digit((i as u32 + 1) % 10, 10).unwrap_or(' '),
+                    title: info.name.clone(),
+                    hint: format!("{} · {age} ago{auto}", sessions.join(", ")),
+                    danger: false,
+                }
+            })
+            .collect();
+        (infos.into_iter().map(|i| i.name).collect(), items)
     }
 
     /// The session switcher: arrows or j/k choose, Enter or the digit
@@ -2251,6 +2302,25 @@ impl App {
             }
             KeyCode::Enter => selected,
             KeyCode::Char('n') => names.len(),
+            KeyCode::Char('x') => {
+                if let Some(name) = names.get(selected) {
+                    self.confirm_target = Some(name.clone());
+                    self.mode = Mode::Confirm(Action::EndSession);
+                }
+                return;
+            }
+            KeyCode::Char('s') => {
+                self.prompt = Some(Prompt {
+                    purpose: PromptFor::SaveHive,
+                    text: String::new(),
+                });
+                self.mode = Mode::Prompt;
+                return;
+            }
+            KeyCode::Char('h') => {
+                self.mode = Mode::Hives(0);
+                return;
+            }
             KeyCode::Char('r') => {
                 if let Some(name) = names.get(selected) {
                     self.prompt = Some(Prompt {
@@ -2278,12 +2348,113 @@ impl App {
                 });
                 self.mode = Mode::Prompt;
             }
-            None => {
-                self.flash = Some(match crate::client::restore_hive(persist::LAST) {
-                    Ok(started) => format!("restored {}, Ctrl+B S switches", started.join(", ")),
-                    Err(e) => format!("not restored: {e:#}"),
-                });
+            None => {}
+        }
+    }
+
+    /// The hives menu: Enter or the digit brings a hive back, s saves the
+    /// running sessions as a new one, u over the selected one, r renames,
+    /// x deletes.
+    fn hives_key(&mut self, key: KeyEvent, selected: usize) {
+        let (names, _) = self.hive_items();
+        let count = names.len().max(1);
+        let selected = selected.min(count - 1);
+        let chosen = names.get(selected).cloned();
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q') => self.mode = Mode::Normal,
+            KeyCode::Up | KeyCode::Char('k') => {
+                self.mode = Mode::Hives((selected + count - 1) % count);
             }
+            KeyCode::Down | KeyCode::Char('j') | KeyCode::Tab => {
+                self.mode = Mode::Hives((selected + 1) % count);
+            }
+            KeyCode::Char('s') => {
+                self.prompt = Some(Prompt {
+                    purpose: PromptFor::SaveHive,
+                    text: String::new(),
+                });
+                self.mode = Mode::Prompt;
+            }
+            KeyCode::Char('u') => {
+                if let Some(name) = chosen {
+                    self.confirm_target = Some(name);
+                    self.mode = Mode::Confirm(Action::OverwriteHive);
+                }
+            }
+            KeyCode::Char('r') => {
+                if let Some(name) = chosen {
+                    self.prompt = Some(Prompt {
+                        purpose: PromptFor::RenameHive(name.clone()),
+                        text: name,
+                    });
+                    self.mode = Mode::Prompt;
+                }
+            }
+            KeyCode::Char('x') => {
+                if let Some(name) = chosen {
+                    self.confirm_target = Some(name);
+                    self.mode = Mode::Confirm(Action::DeleteHive);
+                }
+            }
+            KeyCode::Enter => {
+                if let Some(name) = chosen {
+                    self.mode = Mode::Normal;
+                    self.restore_hive(&name);
+                }
+            }
+            KeyCode::Char(c) => {
+                if let Some(i) = c.to_digit(10)
+                    && let Some(name) = names.get((i as usize + 9) % 10)
+                {
+                    let name = name.clone();
+                    self.mode = Mode::Normal;
+                    self.restore_hive(&name);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Starts the sessions of hive `name` that do not run.
+    fn restore_hive(&mut self, name: &str) {
+        self.flash = Some(match crate::client::restore_hive(name) {
+            Ok(started) if started.is_empty() => {
+                format!("every session of hive {name} runs already")
+            }
+            Ok(started) => format!("hive {name}: started {}, ^B S switches", started.join(", ")),
+            Err(e) => format!("not restored: {e:#}"),
+        });
+    }
+
+    /// Saves every running session as hive `name`, this one from memory:
+    /// asking its own socket would wait on itself.
+    fn save_hive(&mut self, name: &str) {
+        let own = (protocol::session_name(), self.saved());
+        let result =
+            crate::client::snapshot_all_but(Some((own.0.as_str(), own.1))).and_then(|hive| {
+                persist::write_hive(name, &hive)?;
+                Ok(hive.sessions.into_keys().collect::<Vec<_>>())
+            });
+        self.flash = Some(match result {
+            Ok(sessions) => format!("hive {name} saved: {}", sessions.join(", ")),
+            Err(e) => format!("not saved: {e:#}"),
+        });
+    }
+
+    /// Ends session `name`: this one like the quit menu does, another one
+    /// through its socket. Either way it lands in the hive `last`.
+    fn end_session(&mut self, name: &str) {
+        if name == protocol::session_name() {
+            self.quit = true;
+            return;
+        }
+        match protocol::session_socket(name) {
+            Ok(socket) => {
+                // Waiting for it to go would hold up this session's loop.
+                thread::spawn(move || crate::client::kill_server_at(&socket));
+                self.flash = Some(format!("session {name} ended, ^B H brings it back"));
+            }
+            Err(e) => self.flash = Some(format!("not ended: {e:#}")),
         }
     }
 
@@ -2621,6 +2792,25 @@ impl App {
                             self.flash = Some("session names use letters, digits, - and _".into());
                         }
                     }
+                    PromptFor::SaveHive => {
+                        let name = text.trim().to_owned();
+                        if !protocol::valid_session_name(&name) {
+                            self.flash = Some("hive names use letters, digits, - and _".into());
+                        } else if persist::hive_infos().iter().any(|h| h.name == name) {
+                            // Saving over a hive is what u is for, confirmed.
+                            self.confirm_target = Some(name);
+                            self.mode = Mode::Confirm(Action::OverwriteHive);
+                        } else {
+                            self.save_hive(&name);
+                        }
+                    }
+                    PromptFor::RenameHive(old) => {
+                        let name = text.trim();
+                        self.flash = Some(match persist::rename_hive(&old, name) {
+                            Ok(()) => format!("hive {old} is now {name}"),
+                            Err(e) => format!("not renamed: {e:#}"),
+                        });
+                    }
                     PromptFor::Search { forward } => {
                         self.mode = Mode::Copy;
                         if !text.is_empty() {
@@ -2800,6 +2990,24 @@ impl App {
         match action {
             Action::ClosePane(id) => self.close(id),
             Action::KillServer => self.quit = true,
+            Action::EndSession => {
+                if let Some(name) = self.confirm_target.take() {
+                    self.end_session(&name);
+                }
+            }
+            Action::DeleteHive => {
+                if let Some(name) = self.confirm_target.take() {
+                    self.flash = Some(match persist::delete_hive(&name) {
+                        Ok(()) => format!("hive {name} deleted"),
+                        Err(e) => format!("not deleted: {e:#}"),
+                    });
+                }
+            }
+            Action::OverwriteHive => {
+                if let Some(name) = self.confirm_target.take() {
+                    self.save_hive(&name);
+                }
+            }
         }
     }
 
@@ -3210,6 +3418,7 @@ impl App {
                         | Mode::Sidebar(_)
                         | Mode::Picker
                         | Mode::Sessions(_)
+                        | Mode::Hives(_)
                 )
                 && (self.mode != Mode::Copy || copy_cursor.is_some())
                 && let Some(position) = cursor
@@ -3275,7 +3484,37 @@ impl App {
                     &[
                         ("↑↓", "select"),
                         ("Enter", "or key switch"),
+                        ("x", "end"),
                         ("r", "rename"),
+                        ("s", "save as hive"),
+                        ("h", "hives"),
+                        ("Esc", "cancel"),
+                    ],
+                );
+            }
+            Mode::Hives(selected) => {
+                let (names, mut items) = self.hive_items();
+                if names.is_empty() {
+                    items.push(menu::MenuItem {
+                        key: ' ',
+                        title: "no hives yet".into(),
+                        hint: "s saves the running sessions as one".into(),
+                        danger: false,
+                    });
+                }
+                menu::draw_choices(
+                    frame,
+                    body,
+                    " ⬢ Hives ",
+                    &items,
+                    selected.min(items.len() - 1),
+                    &[
+                        ("↑↓", "select"),
+                        ("Enter", "or digit bring back"),
+                        ("s", "save new"),
+                        ("u", "update"),
+                        ("r", "rename"),
+                        ("x", "delete"),
                         ("Esc", "cancel"),
                     ],
                 );
@@ -3323,6 +3562,8 @@ impl App {
             PromptFor::Search { forward: true } => " Search down ".to_owned(),
             PromptFor::Search { forward: false } => " Search up ".to_owned(),
             PromptFor::NewSession => " New session ".to_owned(),
+            PromptFor::SaveHive => " Save running sessions as hive ".to_owned(),
+            PromptFor::RenameHive(old) => format!(" Rename hive {old} "),
             PromptFor::RenameSession(old) => format!(" Rename session {old} "),
         };
         let accent = theme::current().accent;
@@ -3339,6 +3580,8 @@ impl App {
                     PromptFor::Search { .. } => "Enter find · then n next, N previous · Esc cancel",
                     PromptFor::NewSession => "Enter start and switch · letters, digits, - and _",
                     PromptFor::RenameSession(_) => "Enter rename · letters, digits, - and _",
+                    PromptFor::SaveHive => "Enter save · letters, digits, - and _ · Esc cancel",
+                    PromptFor::RenameHive(_) => "Enter rename · letters, digits, - and _",
                 },
                 hint,
             ),
@@ -3366,6 +3609,7 @@ impl App {
     /// A warning box in the middle of the screen, asking to confirm `action`.
     fn draw_confirm(&self, frame: &mut Frame, area: Rect, action: Action) {
         let shells = self.panes.len();
+        let target = || self.confirm_target.clone().unwrap_or_default();
         let (title, lines) = match action {
             Action::ClosePane(id) => (
                 " Close pane ",
@@ -3385,6 +3629,33 @@ impl App {
                         Style::new().add_modifier(Modifier::DIM),
                     )),
                 ],
+            ),
+            Action::EndSession => (
+                " End session ",
+                vec![
+                    Line::from(format!(
+                        "End session {} and every program running in it?",
+                        target()
+                    )),
+                    Line::from(Span::styled(
+                        "Its layout goes into the hive `last`, ^B H brings it back.",
+                        Style::new().add_modifier(Modifier::DIM),
+                    )),
+                ],
+            ),
+            Action::DeleteHive => (
+                " Delete hive ",
+                vec![Line::from(format!(
+                    "Delete the hive {}? Running sessions keep running.",
+                    target()
+                ))],
+            ),
+            Action::OverwriteHive => (
+                " Update hive ",
+                vec![Line::from(format!(
+                    "Replace the hive {} with the sessions running now?",
+                    target()
+                ))],
             ),
         };
 
@@ -3580,7 +3851,12 @@ impl App {
             Mode::Sessions(_) => (
                 "SESSIONS",
                 t.magenta,
-                "↑↓ choose · Enter switch · r rename · n new · Esc cancel",
+                "↑↓ choose · Enter switch · n new · x end · r rename · s save as hive · h hives · Esc cancel",
+            ),
+            Mode::Hives(_) => (
+                "HIVES",
+                t.accent,
+                "↑↓ choose · Enter bring back · s save new · u update · r rename · x delete · Esc cancel",
             ),
             Mode::Picker => ("GO TO", t.cyan, "type to filter · Enter go · Esc cancel"),
             Mode::Sidebar(_) => (
@@ -3905,24 +4181,6 @@ fn find_in_rows(
 /// Names are cut to this many characters.
 const MAX_NAME: usize = 32;
 
-/// A workspace tab: its number, and its name if it has one.
-/// For the sessions menu: which sessions of the save `last` do not run
-/// and could be restored, `None` if none.
-fn restorable() -> Option<String> {
-    if std::env::var_os("HIVEMUX_SOCKET").is_some() {
-        return None;
-    }
-    let hive = persist::load_hive(persist::LAST).ok()??;
-    let running = protocol::sessions();
-    let names: Vec<&str> = hive
-        .sessions
-        .keys()
-        .map(String::as_str)
-        .filter(|name| !running.iter().any(|r| r == name))
-        .collect();
-    (!names.is_empty()).then(|| names.join(", "))
-}
-
 /// The button after the tabs that opens a new workspace.
 const NEW_TAB: &str = " + ";
 
@@ -4011,6 +4269,7 @@ fn draw_buttons(frame: &mut Frame, buttons: &[Button]) {
     }
 }
 
+/// A workspace tab: its number, and its name if it has one.
 fn tab_label(n: u8, ws: &Workspace) -> String {
     match &ws.name {
         Some(name) => format!(" {n} {name} "),

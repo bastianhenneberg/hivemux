@@ -384,7 +384,11 @@ pub fn save(args: &[String]) -> Result<()> {
     }
     let path = crate::persist::write_hive(name, &hive)?;
     let names: Vec<&str> = hive.sessions.keys().map(String::as_str).collect();
-    println!("saved {} to {}", names.join(", "), path.display());
+    println!(
+        "hive {name}: saved {} to {}",
+        names.join(", "),
+        path.display()
+    );
     Ok(())
 }
 
@@ -424,6 +428,30 @@ pub fn restore(args: &[String]) -> Result<()> {
             Ok(())
         }
         _ => bail!("usage: hivemux restore [NAME | --list]"),
+    }
+}
+
+/// `hivemux hive <ls | save | restore | rm | rename>`: hives, saved groups
+/// of sessions. `save` and `restore` also work without `hive`.
+pub fn hive(args: &[String]) -> Result<()> {
+    const USAGE: &str =
+        "usage: hivemux hive <ls | save [NAME] | restore [NAME] | rm NAME | rename OLD NEW>";
+    match args {
+        [] => bail!(USAGE),
+        [cmd] if cmd == "ls" => restore(&["--list".to_owned()]),
+        [cmd, rest @ ..] if cmd == "save" => save(rest),
+        [cmd, rest @ ..] if cmd == "restore" => restore(rest),
+        [cmd, name] if cmd == "rm" => {
+            crate::persist::delete_hive(name)?;
+            println!("hive {name} deleted");
+            Ok(())
+        }
+        [cmd, old, name] if cmd == "rename" => {
+            crate::persist::rename_hive(old, name)?;
+            println!("hive {old} is now {name}");
+            Ok(())
+        }
+        _ => bail!(USAGE),
     }
 }
 
