@@ -2,6 +2,7 @@
 //! its output has produced.
 
 use std::io::{Read, Write};
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread;
@@ -26,7 +27,14 @@ impl Pane {
     /// Spawns the user's default shell in a new pty of `rows` x `cols`.
     /// Output is fed into the VT parser on a background thread, which sends
     /// `AppEvent::PtyOutput` after every chunk and `AppEvent::PtyExited(id)` at EOF.
-    pub fn spawn(id: PaneId, rows: u16, cols: u16, events: Sender<AppEvent>) -> Result<Self> {
+    /// The shell starts in `cwd`, or in the server's directory without one.
+    pub fn spawn(
+        id: PaneId,
+        rows: u16,
+        cols: u16,
+        cwd: Option<&Path>,
+        events: Sender<AppEvent>,
+    ) -> Result<Self> {
         let rows = rows.max(1);
         let cols = cols.max(1);
 
@@ -40,8 +48,13 @@ impl Pane {
             .context("failed to open pty")?;
 
         let mut cmd = CommandBuilder::new_default_prog();
-        if let Ok(cwd) = std::env::current_dir() {
-            cmd.cwd(cwd);
+        match cwd {
+            Some(cwd) if cwd.is_dir() => cmd.cwd(cwd),
+            _ => {
+                if let Ok(cwd) = std::env::current_dir() {
+                    cmd.cwd(cwd);
+                }
+            }
         }
         cmd.env("TERM", "xterm-256color");
         cmd.env("HIVEMUX", "1");
@@ -84,6 +97,18 @@ impl Pane {
             child,
             size: (rows, cols),
         })
+    }
+
+    /// The working directory of the program in the foreground of this pane,
+    /// e.g. the shell, or nvim started from it. Read from `/proc`, so Linux
+    /// only.
+    pub fn cwd(&self) -> Option<PathBuf> {
+        let pid = self
+            .master
+            .process_group_leader()
+            .map(|pid| pid as u32)
+            .or_else(|| self.child.process_id())?;
+        std::fs::read_link(format!("/proc/{pid}/cwd")).ok()
     }
 
     pub fn screen(&self) -> MutexGuard<'_, vt100::Parser> {

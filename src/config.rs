@@ -35,10 +35,70 @@ impl Default for WhichKey {
     }
 }
 
+/// Where a bar element is shown: in a line above or below the panes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Placement {
+    Top,
+    Bottom,
+    Off,
+}
+
+impl Placement {
+    fn name(self) -> &'static str {
+        match self {
+            Placement::Top => "top",
+            Placement::Bottom => "bottom",
+            Placement::Off => "off",
+        }
+    }
+}
+
+/// The elements of the bars around the panes. Elements on the same side
+/// share one line: the control bar and the workspace tabs on the left, the
+/// path on the right.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Bars {
+    /// The hivemux badge, mode and key hints. Never off, it is the only
+    /// sign of the prefix when the which-key menu is off.
+    pub control: Placement,
+    /// The workspace tabs.
+    pub tabs: Placement,
+    /// The working directory of the focused pane.
+    pub path: Placement,
+}
+
+impl Default for Bars {
+    fn default() -> Self {
+        Self {
+            control: Placement::Bottom,
+            tabs: Placement::Bottom,
+            path: Placement::Bottom,
+        }
+    }
+}
+
+impl Bars {
+    /// Whether anything is shown on `side`.
+    pub fn uses(&self, side: Placement) -> bool {
+        self.control() == side || self.tabs == side || self.path == side
+    }
+
+    /// The control bar's side, bottom if the config says off.
+    pub fn control(&self) -> Placement {
+        match self.control {
+            Placement::Off => Placement::Bottom,
+            side => side,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
     pub which_key: WhichKey,
+    pub bars: Bars,
 }
 
 impl Config {
@@ -96,6 +156,15 @@ pub struct Setting {
     pub cycle: fn(&mut Config),
 }
 
+/// bottom → top → off → bottom, or without off for elements that must stay.
+fn next_placement(p: Placement, allow_off: bool) -> Placement {
+    match p {
+        Placement::Bottom => Placement::Top,
+        Placement::Top if allow_off => Placement::Off,
+        Placement::Top | Placement::Off => Placement::Bottom,
+    }
+}
+
 pub const SETTINGS: &[Setting] = &[
     Setting {
         name: "Which-key menu",
@@ -114,6 +183,21 @@ pub const SETTINGS: &[Setting] = &[
                 Side::Right => Side::Left,
             }
         },
+    },
+    Setting {
+        name: "Control bar",
+        value: |c| c.bars.control().name(),
+        cycle: |c| c.bars.control = next_placement(c.bars.control(), false),
+    },
+    Setting {
+        name: "Workspace tabs",
+        value: |c| c.bars.tabs.name(),
+        cycle: |c| c.bars.tabs = next_placement(c.bars.tabs, true),
+    },
+    Setting {
+        name: "Path",
+        value: |c| c.bars.path.name(),
+        cycle: |c| c.bars.path = next_placement(c.bars.path, true),
     },
 ];
 
@@ -153,14 +237,39 @@ mod tests {
     }
 
     #[test]
-    fn cycling_twice_returns_to_the_start() {
+    fn cycling_comes_back_to_the_start() {
         for setting in SETTINGS {
             let mut config = Config::default();
             let before = (setting.value)(&config);
             (setting.cycle)(&mut config);
             assert_ne!((setting.value)(&config), before, "{}", setting.name);
-            (setting.cycle)(&mut config);
-            assert_eq!((setting.value)(&config), before, "{}", setting.name);
+            let mut steps = 1;
+            while (setting.value)(&config) != before {
+                (setting.cycle)(&mut config);
+                steps += 1;
+                assert!(steps <= 3, "{} never comes back", setting.name);
+            }
         }
+    }
+
+    #[test]
+    fn control_bar_is_never_off() {
+        let mut config = Config::parse("[bars]\ncontrol = \"off\"\n").unwrap();
+        assert_eq!(config.bars.control(), Placement::Bottom);
+        let setting = SETTINGS.iter().find(|s| s.name == "Control bar").unwrap();
+        for _ in 0..4 {
+            (setting.cycle)(&mut config);
+            assert_ne!(config.bars.control, Placement::Off);
+        }
+    }
+
+    #[test]
+    fn bars_tell_which_sides_are_used() {
+        let config = Config::parse("[bars]\ntabs = \"top\"\npath = \"off\"\n").unwrap();
+        assert!(config.bars.uses(Placement::Top));
+        assert!(config.bars.uses(Placement::Bottom));
+        let config =
+            Config::parse("[bars]\ncontrol = \"top\"\ntabs = \"top\"\npath = \"top\"\n").unwrap();
+        assert!(!config.bars.uses(Placement::Bottom));
     }
 }

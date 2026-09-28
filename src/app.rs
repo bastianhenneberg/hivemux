@@ -5,6 +5,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::io::{self, Write};
 use std::os::unix::net::UnixStream;
+use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -12,14 +13,14 @@ use std::time::{Duration, Instant};
 use anyhow::Result;
 use ratatui::backend::CrosstermBackend;
 use ratatui::crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind};
-use ratatui::layout::{Constraint, Layout as UiLayout, Rect};
+use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Clear, Padding, Paragraph};
 use ratatui::{Frame, Terminal, TerminalOptions, Viewport};
 
 use crate::bindings::{self, Command, Menu};
-use crate::config::{Config, SETTINGS};
+use crate::config::{Bars, Config, Placement, SETTINGS};
 use crate::keys;
 use crate::layout::{Axis, MIN_PANE_SIZE, PaneId};
 use crate::menu::{self, HONEY};
@@ -168,13 +169,13 @@ impl App {
     /// Starts with one pane and runs until the last pane is closed or the
     /// server is told to shut down.
     pub fn run(events: Sender<AppEvent>, rx: &Receiver<AppEvent>) -> Result<()> {
-        let body = body_area(DEFAULT_SCREEN);
-        let inner = pane_inner(body);
-        let first = Pane::spawn(0, inner.height, inner.width, events.clone())?;
         let (config, config_error) = Config::load();
         if let Some(e) = &config_error {
             eprintln!("config: {e}");
         }
+        let body = screen_layout(DEFAULT_SCREEN, &config.bars).body;
+        let inner = pane_inner(body);
+        let first = Pane::spawn(0, inner.height, inner.width, None, events.clone())?;
 
         let mut app = App {
             panes: HashMap::from([(0, first)]),
@@ -202,7 +203,7 @@ impl App {
 
     fn event_loop(&mut self, rx: &Receiver<AppEvent>) {
         while !self.quit {
-            self.body = body_area(self.screen);
+            self.body = screen_layout(self.screen, &self.config.bars).body;
             self.sync_sizes();
             self.render();
 
@@ -527,24 +528,26 @@ impl App {
             return;
         }
 
+        let cwd = self.focused_cwd();
         let id = self.next_id;
         self.next_id += 1;
         self.ws.split(axis, id);
-        self.spawn_into_ws(id);
+        self.spawn_into_ws(id, cwd);
     }
 
     /// Starts a shell in a new floating pane in the middle of the screen.
     fn new_float(&mut self) {
+        let cwd = self.focused_cwd();
         let id = self.next_id;
         self.next_id += 1;
         self.ws.add_float(id, self.body);
-        self.spawn_into_ws(id);
+        self.spawn_into_ws(id, cwd);
     }
 
     /// Starts the shell for pane `id`, which was just added to the active
     /// workspace, sized to the area it got there. Takes the pane out again
     /// if the shell cannot be started.
-    fn spawn_into_ws(&mut self, id: PaneId) {
+    fn spawn_into_ws(&mut self, id: PaneId, cwd: Option<PathBuf>) {
         let rect = self
             .ws
             .rects(self.body)
@@ -552,7 +555,13 @@ impl App {
             .find_map(|(pane, rect)| (pane == id).then_some(rect))
             .unwrap_or(self.body);
         let inner = pane_inner(rect);
-        match Pane::spawn(id, inner.height, inner.width, self.events.clone()) {
+        match Pane::spawn(
+            id,
+            inner.height,
+            inner.width,
+            cwd.as_deref(),
+            self.events.clone(),
+        ) {
             Ok(pane) => {
                 self.panes.insert(id, pane);
             }
@@ -561,6 +570,11 @@ impl App {
                 self.ws.remove(id);
             }
         }
+    }
+
+    /// The working directory of the focused pane, where new panes start.
+    fn focused_cwd(&self) -> Option<PathBuf> {
+        self.panes.get(&self.ws.focus).and_then(Pane::cwd)
     }
 
     /// Removes pane `id`, killing its process if it still runs. A workspace
@@ -626,9 +640,16 @@ impl App {
             return;
         }
 
+        let cwd = self.focused_cwd();
         let id = self.next_id;
         let inner = pane_inner(self.body);
-        let pane = match Pane::spawn(id, inner.height, inner.width, self.events.clone()) {
+        let pane = match Pane::spawn(
+            id,
+            inner.height,
+            inner.width,
+            cwd.as_deref(),
+            self.events.clone(),
+        ) {
             Ok(pane) => pane,
             Err(e) => {
                 eprintln!("failed to start a shell for workspace {n}: {e:#}");
@@ -691,7 +712,8 @@ impl App {
     }
 
     fn draw(&self, frame: &mut Frame) {
-        let [body, status_area] = split_screen(frame.area());
+        let screen = screen_layout(frame.area(), &self.config.bars);
+        let body = screen.body;
 
         for (id, rect) in self.ws.rects(body) {
             let Some(pane) = self.panes.get(&id) else {
@@ -733,7 +755,12 @@ impl App {
             }
         }
 
-        frame.render_widget(self.status_line(), status_area);
+        if let Some(area) = screen.top {
+            self.draw_bar(frame, area, Placement::Top);
+        }
+        if let Some(area) = screen.bottom {
+            self.draw_bar(frame, area, Placement::Bottom);
+        }
 
         match self.mode {
             Mode::Prefix(menu) if self.config.which_key.enabled => {
@@ -838,27 +865,67 @@ impl App {
         frame.render_widget(Paragraph::new(text).block(block), popup);
     }
 
-    fn status_line(&self) -> Line<'static> {
-        let badge = Style::new()
-            .fg(Color::Black)
-            .bg(HONEY)
-            .add_modifier(Modifier::BOLD);
+    /// One bar line: control bar and workspace tabs on the left, the path
+    /// on the right, whichever of them the settings put on `side`.
+    fn draw_bar(&self, frame: &mut Frame, area: Rect, side: Placement) {
+        let bars = &self.config.bars;
         let hint = Style::new().add_modifier(Modifier::DIM);
-        let mut spans = vec![Span::styled(" ⬢ hivemux ", badge), Span::raw(" ")];
-        for n in self.workspaces() {
-            if n == self.workspace {
-                spans.push(Span::styled(
-                    format!(" {n} "),
-                    Style::new()
-                        .fg(HONEY)
-                        .bg(Color::DarkGray)
-                        .add_modifier(Modifier::BOLD),
-                ));
-            } else {
-                spans.push(Span::styled(format!(" {n} "), hint));
+        let control = bars.control() == side;
+
+        let mut spans = Vec::new();
+        if control {
+            spans.push(Span::styled(" ⬢ hivemux ", badge_style()));
+            spans.push(Span::raw(" "));
+        }
+        if bars.tabs == side {
+            spans.extend(self.tab_spans());
+            spans.push(Span::styled(if control { "│ " } else { " " }, hint));
+        }
+        if control {
+            spans.extend(self.mode_spans());
+        }
+        let left = Line::from(spans);
+
+        if bars.path == side
+            && let Some(cwd) = self.focused_cwd()
+        {
+            let room = usize::from(area.width).saturating_sub(left.width() + 3);
+            let path = shorten(&tilde(&cwd), room);
+            if !path.is_empty() {
+                frame.render_widget(
+                    Line::styled(format!(" {path} "), hint).right_aligned(),
+                    area,
+                );
             }
         }
-        spans.push(Span::styled("│ ", hint));
+        frame.render_widget(left, area);
+    }
+
+    fn tab_spans(&self) -> Vec<Span<'static>> {
+        let hint = Style::new().add_modifier(Modifier::DIM);
+        self.workspaces()
+            .into_iter()
+            .map(|n| {
+                if n == self.workspace {
+                    Span::styled(
+                        format!(" {n} "),
+                        Style::new()
+                            .fg(HONEY)
+                            .bg(Color::DarkGray)
+                            .add_modifier(Modifier::BOLD),
+                    )
+                } else {
+                    Span::styled(format!(" {n} "), hint)
+                }
+            })
+            .collect()
+    }
+
+    /// The mode badge and key hints of the control bar.
+    fn mode_spans(&self) -> Vec<Span<'static>> {
+        let badge = badge_style();
+        let hint = Style::new().add_modifier(Modifier::DIM);
+        let mut spans = Vec::new();
         match self.mode {
             Mode::Prefix(_) => {
                 spans.push(Span::styled(" PREFIX ", badge));
@@ -920,7 +987,7 @@ impl App {
                 ));
             }
         }
-        Line::from(spans)
+        spans
     }
 }
 
@@ -940,13 +1007,51 @@ fn is_prefix(key: KeyEvent) -> bool {
     bindings::PREFIX.matches(key)
 }
 
-/// Panes on top, one line of status bar at the bottom.
-fn split_screen(area: Rect) -> [Rect; 2] {
-    UiLayout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(area)
+/// The screen cut into the bar lines the settings ask for and the panes.
+struct ScreenLayout {
+    top: Option<Rect>,
+    body: Rect,
+    bottom: Option<Rect>,
 }
 
-fn body_area(screen: Rect) -> Rect {
-    split_screen(screen)[0]
+fn screen_layout(screen: Rect, bars: &Bars) -> ScreenLayout {
+    let top = u16::from(bars.uses(Placement::Top)).min(screen.height);
+    let bottom = u16::from(bars.uses(Placement::Bottom)).min(screen.height - top);
+    let line = |y| Rect {
+        y,
+        height: 1,
+        ..screen
+    };
+    ScreenLayout {
+        top: (top > 0).then(|| line(screen.y)),
+        body: Rect {
+            y: screen.y + top,
+            height: screen.height - top - bottom,
+            ..screen
+        },
+        bottom: (bottom > 0).then(|| line(screen.bottom() - 1)),
+    }
+}
+
+fn badge_style() -> Style {
+    Style::new()
+        .fg(Color::Black)
+        .bg(HONEY)
+        .add_modifier(Modifier::BOLD)
+}
+
+/// `path` cut down to `room` characters, keeping its end, e.g.
+/// `…/hivemux/src`.
+fn shorten(path: &str, room: usize) -> String {
+    let len = path.chars().count();
+    if len <= room {
+        return path.to_owned();
+    }
+    if room < 2 {
+        return String::new();
+    }
+    let tail: String = path.chars().skip(len - (room - 1)).collect();
+    format!("…{tail}")
 }
 
 /// The area inside a pane's border, i.e. the size of its pty.
@@ -970,4 +1075,38 @@ fn shell_name() -> String {
         .ok()
         .and_then(|shell| shell.rsplit('/').next().map(str::to_owned))
         .unwrap_or_else(|| "shell".into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bars_take_lines_on_their_side() {
+        let screen = Rect::new(0, 0, 80, 24);
+        let layout = screen_layout(screen, &Bars::default());
+        assert_eq!(layout.top, None);
+        assert_eq!(layout.body, Rect::new(0, 0, 80, 23));
+        assert_eq!(layout.bottom, Some(Rect::new(0, 23, 80, 1)));
+
+        let split = Bars {
+            control: Placement::Bottom,
+            tabs: Placement::Top,
+            path: Placement::Off,
+        };
+        let layout = screen_layout(screen, &split);
+        assert_eq!(layout.top, Some(Rect::new(0, 0, 80, 1)));
+        assert_eq!(layout.body, Rect::new(0, 1, 80, 22));
+        assert_eq!(layout.bottom, Some(Rect::new(0, 23, 80, 1)));
+    }
+
+    #[test]
+    fn long_paths_keep_their_end() {
+        assert_eq!(
+            shorten("~/Development/hivemux", 40),
+            "~/Development/hivemux"
+        );
+        assert_eq!(shorten("~/Development/hivemux", 8), "…hivemux");
+        assert_eq!(shorten("~/x", 1), "");
+    }
 }
