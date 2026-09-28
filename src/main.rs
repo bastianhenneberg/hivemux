@@ -37,6 +37,10 @@ For scripts and agents:
                                         start a command in a new pane
   rename [--pane N | --workspace N] [--clear | <name>]
                                         name a pane or a workspace
+  read [--pane N] [--lines N]           print a pane's screen, or its last N lines
+  wait [--pane N] --until <state> [--timeout S]
+                                        wait for an agent: working, blocked, idle,
+                                        done, or ready (idle or done)
   hooks                                 print the Claude Code hooks for status
   help          show this help
 
@@ -64,6 +68,8 @@ fn main() -> Result<()> {
         ["send", ..] => cli::send(&args[1..]),
         ["new", ..] => cli::new(&args[1..]),
         ["rename", ..] => cli::rename(&args[1..]),
+        ["read", ..] => cli::read(&args[1..]),
+        ["wait", ..] => cli::wait(&args[1..]),
         ["hooks"] => cli::hooks(),
         ["help" | "-h" | "--help"] => {
             println!("{USAGE}");

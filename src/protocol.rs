@@ -53,6 +53,9 @@ pub enum Request {
         text: String,
         enter: bool,
     },
+    /// The text on a pane's screen, or its last `lines` lines including the
+    /// history.
+    Read { pane: PaneId, lines: Option<usize> },
     /// Name a pane or a workspace, or clear its name with `None`.
     Rename {
         target: RenameTarget,

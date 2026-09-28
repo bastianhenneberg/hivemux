@@ -124,6 +124,67 @@ pub fn send(args: &[String]) -> Result<()> {
     Ok(())
 }
 
+/// `hivemux read [--pane N] [--lines N]`: what is on a pane's screen, or its
+/// last N lines with the history.
+pub fn read(args: &[String]) -> Result<()> {
+    let mut rest = args.to_vec();
+    let pane = take_pane(&mut rest)?.context("which pane? use --pane N")?;
+    let lines = take_value(&mut rest, "--lines")?
+        .map(|n| n.parse::<usize>().context("--lines takes a number"))
+        .transpose()?;
+    let value = client::request(Request::Read { pane, lines })?;
+    println!("{}", value["text"].as_str().unwrap_or_default());
+    Ok(())
+}
+
+/// `hivemux wait [--pane N] --until <working|blocked|idle|done|ready> [--timeout S]`
+///
+/// Waits until the agent in a pane reaches a state, for scripts and agents
+/// that hand work to another agent. `ready` means idle or done. Exits with
+/// an error on timeout, or when the pane is gone.
+pub fn wait(args: &[String]) -> Result<()> {
+    let mut rest = args.to_vec();
+    let pane = take_pane(&mut rest)?.context("which pane? use --pane N")?;
+    let until = take_value(&mut rest, "--until")?.context(
+        "usage: hivemux wait [--pane N] --until <working|blocked|idle|done|ready> [--timeout S]",
+    )?;
+    let wanted: &[&str] = match until.as_str() {
+        "ready" => &["idle", "done"],
+        "working" => &["working"],
+        "blocked" => &["blocked"],
+        "idle" => &["idle"],
+        "done" => &["done"],
+        other => bail!("unknown state {other:?}, use working, blocked, idle, done or ready"),
+    };
+    let timeout = take_value(&mut rest, "--timeout")?
+        .map(|s| s.parse::<f64>().context("--timeout takes seconds"))
+        .transpose()?
+        .map(std::time::Duration::from_secs_f64);
+
+    let start = std::time::Instant::now();
+    loop {
+        let panes = client::request(Request::List)?;
+        let Some(entry) = panes
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find(|p| p["pane"].as_u64() == Some(pane as u64))
+        else {
+            bail!("pane {pane} is gone");
+        };
+        if let Some(state) = entry["state"].as_str()
+            && wanted.contains(&state)
+        {
+            println!("{state}");
+            return Ok(());
+        }
+        if timeout.is_some_and(|t| start.elapsed() >= t) {
+            bail!("pane {pane} did not become {until} in time");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(250));
+    }
+}
+
 /// `hivemux rename [--pane N | --workspace N] [--clear | <name>...]`
 ///
 /// Without a target it names the pane it runs in, so an agent can label its

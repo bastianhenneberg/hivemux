@@ -280,7 +280,7 @@ pub const BINDINGS: &[Binding] = &[
     },
     Binding {
         label: "a",
-        description: "waiting agent",
+        description: "waiting/done agent",
         group: Group::Navigate,
         keys: &[(Key::plain(Char('a')), C::JumpToWaiting)],
     },

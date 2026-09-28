@@ -23,7 +23,7 @@ use ratatui::{Frame, Terminal, TerminalOptions, Viewport};
 
 use crate::agent::{self, AgentState};
 use crate::bindings::{self, Command, Menu};
-use crate::config::{self, Bars, Config, Placement, SETTINGS, Side};
+use crate::config::{self, Bars, Config, Notifications, Placement, SETTINGS, Side};
 use crate::keys;
 use crate::layout::{Axis, MIN_PANE_SIZE, PaneId};
 use crate::menu;
@@ -608,6 +608,10 @@ impl App {
             }
             Request::List => Ok(self.list()),
             Request::Rename { target, name } => self.rename(target, name),
+            Request::Read { pane, lines } => {
+                let p = self.panes.get(&pane).ok_or(format!("no pane {pane}"))?;
+                Ok(serde_json::json!({ "pane": pane, "text": p.read(lines) }))
+            }
             Request::Send { pane, text, enter } => {
                 let p = self.panes.get_mut(&pane).ok_or(format!("no pane {pane}"))?;
                 p.note_input();
@@ -751,18 +755,21 @@ impl App {
         }
         for (&id, &(state, _)) in &seen {
             let was = self.agents.get(&id).map(|(s, _)| *s);
-            let in_view = self.ws.contains(id) && (self.ws.focus == id || self.client.is_none());
+            // Nobody looks at anything while detached.
+            let in_view = self.client.is_some() && self.ws.contains(id) && self.ws.focus == id;
             if state == AgentState::Idle
                 && matches!(was, Some(AgentState::Working | AgentState::Blocked))
                 && !in_view
             {
                 self.unseen.insert(id);
+                self.notify(id, "is done");
             }
             if state == AgentState::Blocked && was != Some(AgentState::Blocked) && !in_view {
                 self.flash = Some(format!("pane {id} needs you · ^B a"));
                 if let Some(client) = &mut self.client {
                     let _ = client.send(&ServerMsg::Output(b"\x07".to_vec()));
                 }
+                self.notify(id, "needs you");
             }
         }
         self.unseen.retain(|id| seen.contains_key(id));
@@ -770,6 +777,51 @@ impl App {
             self.unseen.remove(&self.ws.focus);
         }
         self.agents = seen;
+    }
+
+    /// Tells the user outside hivemux that the agent in pane `id` `what`,
+    /// e.g. "needs you", the way the settings say.
+    fn notify(&mut self, id: PaneId, what: &str) {
+        let Some(pane) = self.panes.get(&id) else {
+            return;
+        };
+        let who = pane
+            .name
+            .clone()
+            .or_else(|| pane.program())
+            .unwrap_or_else(|| "agent".into());
+        let place = match (self.workspace_of(id), pane.cwd()) {
+            (Some(n), Some(cwd)) => format!("workspace {n} · {}", tilde(&cwd)),
+            (Some(n), None) => format!("workspace {n}"),
+            _ => String::new(),
+        };
+        let title = format!("{who} {what}");
+        match self.config.notifications {
+            Notifications::Off => {}
+            Notifications::Terminal => {
+                if let Some(client) = &mut self.client {
+                    let text: String = format!("hivemux: {title}")
+                        .chars()
+                        .filter(|c| !c.is_control())
+                        .collect();
+                    let _ = client.send(&ServerMsg::Output(
+                        format!("\x1b]9;{text}\x07").into_bytes(),
+                    ));
+                }
+            }
+            Notifications::System => {
+                let spawned = std::process::Command::new("notify-send")
+                    .args(["--app-name=hivemux", &title, &place])
+                    .stdin(std::process::Stdio::null())
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .spawn();
+                // Reaped on a thread of its own, so the loop never waits.
+                if let Ok(mut child) = spawned {
+                    thread::spawn(move || child.wait());
+                }
+            }
+        }
     }
 
     /// The state to show for pane `id`: done while an idle agent has not
@@ -878,19 +930,25 @@ impl App {
     /// Focuses the agent that has been waiting longest, in any workspace.
     /// Pressed again, it goes on to the next one.
     fn jump_to_waiting(&mut self) {
+        // Agents waiting for the user first, then those that finished
+        // unseen, each oldest first.
         let mut waiting: Vec<(PaneId, Instant)> = self
             .agents
             .iter()
-            .filter(|(_, (state, _))| *state == AgentState::Blocked)
+            .filter(|(id, (state, _))| {
+                *state == AgentState::Blocked || self.shown_state(**id) == Some(AgentState::Done)
+            })
             .map(|(&id, &(_, since))| (id, since))
             .collect();
-        waiting.sort_by_key(|&(id, since)| (since, id));
+        waiting.sort_by_key(|&(id, since)| {
+            (self.shown_state(id) != Some(AgentState::Blocked), since, id)
+        });
         let Some(&(target, _)) = waiting
             .iter()
             .find(|(id, _)| *id != self.ws.focus)
             .or(waiting.first())
         else {
-            self.flash = Some("no agent is waiting".into());
+            self.flash = Some("no agent is waiting or done".into());
             return;
         };
         self.reveal(target);

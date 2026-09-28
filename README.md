@@ -59,7 +59,7 @@ a time, attaching from a second terminal detaches the first.
 | `Ctrl+B` `←↑↓→` | Focus the pane in that direction |
 | `Ctrl+B` `o` | Focus the next pane |
 | `Ctrl+B` `;` | Back to the pane focused before, across workspaces |
-| `Ctrl+B` `a` | Jump to the agent that has waited longest for you |
+| `Ctrl+B` `a` | Jump to the agent that has waited longest for you, then to finished ones |
 | `Ctrl+B` `[` | Copy mode: scroll back with vim keys (`Ctrl-U`/`Ctrl-D`, `Ctrl-B`/`Ctrl-F`, `g`/`G`), `v` select, `y` copy, `q` quit |
 | `Ctrl+B` `u` | Copy mode, one page up right away (`PgUp` works too) |
 | `Ctrl+B` `Ctrl+←↑↓→` | Resize by one cell (`Alt` for five), floating panes too |
@@ -89,7 +89,9 @@ hides it (as in TUIOS), `Ctrl+B e` moves the keyboard into it, the settings put 
 
 Every pane running a coding agent shows what it is doing: `● working`, `◆ blocked` (it waits
 for you), `✦ done` (finished while you were elsewhere) or `✓ idle`. A workspace tab turns red when an agent there waits, the bell rings, and
-`Ctrl+B a` takes you to it.
+`Ctrl+B a` takes you to it. You also get a desktop notification when an agent waits or finishes
+while you look elsewhere or are detached: through `notify-send`, or as OSC 9 for terminals like
+Ghostty and WezTerm, or not at all (setting `notifications = "system" | "terminal" | "off"`).
 
 hivemux recognises claude, codex, opencode, aider, gemini, crush, goose, amp, cursor-agent, qwen
 and kilo. It guesses from their output and from questions on the screen. For exact states, let
@@ -112,6 +114,8 @@ hivemux send --pane 3 "run the tests"          # type into a pane, then Enter
 hivemux new --workspace 2 -- claude --resume   # start a command in a new pane
 hivemux new --float                            # a floating shell
 hivemux rename "tests"                          # name the pane this runs in
+hivemux wait --pane 3 --until ready            # wait until an agent is idle or done
+hivemux read --pane 3 --lines 20               # what it wrote last
 hivemux rename --workspace 2 api               # name a workspace
 ```
 

@@ -236,6 +236,22 @@ impl Pane {
         text_between(&mut self.parser.lock().unwrap(), start, end)
     }
 
+    /// The visible screen as text, or the last `lines` lines of history and
+    /// screen together.
+    pub fn read(&self, lines: Option<usize>) -> String {
+        let Some(lines) = lines else {
+            return self.screen().screen().contents();
+        };
+        let history = self.history_len();
+        let (rows, cols) = self.screen().screen().size();
+        let total = history + usize::from(rows);
+        // The last lines with something on them: the empty rows under the
+        // prompt do not count.
+        let all = self.text((0, 0), (total - 1, cols));
+        let all: Vec<&str> = all.trim_end().lines().collect();
+        all[all.len().saturating_sub(lines)..].join("\n")
+    }
+
     pub fn screen(&self) -> MutexGuard<'_, vt100::Parser> {
         self.parser.lock().unwrap()
     }

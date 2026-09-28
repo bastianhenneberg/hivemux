@@ -104,6 +104,20 @@ pub struct Config {
     pub which_key: WhichKey,
     pub bars: Bars,
     pub sidebar: Sidebar,
+    /// How to tell the user that an agent waits or finished while they
+    /// looked elsewhere.
+    pub notifications: Notifications,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Notifications {
+    /// A desktop notification through `notify-send`.
+    #[default]
+    System,
+    /// OSC 9, which terminals like Ghostty and WezTerm turn into one.
+    Terminal,
+    Off,
 }
 
 /// The sidebar with workspaces and agents, like the rail in TUIOS.
@@ -130,6 +144,7 @@ impl Default for Config {
             which_key: WhichKey::default(),
             bars: Bars::default(),
             sidebar: Sidebar::default(),
+            notifications: Notifications::default(),
         }
     }
 }
@@ -242,6 +257,28 @@ pub const SETTINGS: &[Setting] = &[
                 Side::Left => Side::Right,
                 Side::Right => Side::Left,
             }
+        },
+    },
+    Setting {
+        name: "Notifications",
+        value: |c| {
+            match c.notifications {
+                Notifications::System => "system",
+                Notifications::Terminal => "terminal",
+                Notifications::Off => "off",
+            }
+            .to_owned()
+        },
+        step: |c, forward| {
+            c.notifications = step_in(
+                &[
+                    Notifications::System,
+                    Notifications::Terminal,
+                    Notifications::Off,
+                ],
+                &c.notifications,
+                forward,
+            )
         },
     },
     Setting {
