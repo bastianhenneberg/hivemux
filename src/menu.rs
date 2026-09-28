@@ -16,10 +16,20 @@ const GAP: usize = 2;
 const GROUP_GAP: usize = 4;
 
 /// The which-key popup in the bottom corner of `area` on `side`.
-pub fn draw_which_key(frame: &mut Frame, area: Rect, side: Side, menu: Menu) {
+/// `commands` are the user's own, as (key, name), listed in their menu.
+pub fn draw_which_key(
+    frame: &mut Frame,
+    area: Rect,
+    side: Side,
+    menu: Menu,
+    commands: &[(char, String)],
+) {
     let area = inset(area);
     // Border and one column of padding on each side.
-    let lines = groups(menu.groups(), usize::from(area.width).saturating_sub(4));
+    let lines = match menu {
+        Menu::Commands => command_lines(commands),
+        menu => groups(menu.groups(), usize::from(area.width).saturating_sub(4)),
+    };
 
     let width = lines.iter().map(Line::width).max().unwrap_or(0) as u16 + 4;
     let height = lines.len() as u16 + 2;
@@ -38,7 +48,6 @@ pub fn draw_which_key(frame: &mut Frame, area: Rect, side: Side, menu: Menu) {
     draw_box(frame, popup, title, 1, lines);
 }
 
-/// The full key reference in the middle of `area`.
 /// The full key reference in the middle of `area`, scrolled down by
 /// `scroll` lines when it is taller than the screen.
 pub fn draw_help(frame: &mut Frame, area: Rect, scroll: u16) {
@@ -301,6 +310,28 @@ fn key_style() -> Style {
         .add_modifier(Modifier::BOLD)
 }
 
+/// The commands menu: the user's commands from the config, then back and
+/// cancel.
+fn command_lines(commands: &[(char, String)]) -> Vec<Line<'static>> {
+    let mut lines = group_lines(Group::Commands);
+    let fixed = lines.split_off(1);
+    if commands.is_empty() {
+        lines.push(Line::styled(
+            "none yet, add [[commands]] to config.toml",
+            Style::new().add_modifier(Modifier::DIM),
+        ));
+    }
+    for (key, name) in commands {
+        lines.push(Line::from(vec![
+            Span::styled(key.to_string(), key_style()),
+            Span::raw(" ".repeat(2 + GAP)),
+            Span::raw(name.clone()),
+        ]));
+    }
+    lines.extend(fixed);
+    lines
+}
+
 /// A group's title followed by one line per binding, keys aligned.
 fn group_lines(group: Group) -> Vec<Line<'static>> {
     let bindings: Vec<&Binding> = in_group(group).collect();
@@ -382,7 +413,7 @@ mod tests {
     #[test]
     fn which_key_fits_side_by_side_on_a_wide_screen() {
         let screen = render(120, 30, |f, a| {
-            draw_which_key(f, a, Side::Right, Menu::Root)
+            draw_which_key(f, a, Side::Right, Menu::Root, &[])
         });
         let row = screen
             .lines()
@@ -395,7 +426,9 @@ mod tests {
 
     #[test]
     fn which_key_stacks_on_a_narrow_screen() {
-        let screen = render(40, 40, |f, a| draw_which_key(f, a, Side::Left, Menu::Root));
+        let screen = render(40, 40, |f, a| {
+            draw_which_key(f, a, Side::Left, Menu::Root, &[])
+        });
         let row = screen
             .lines()
             .find(|l| l.contains("Panes"))
@@ -406,9 +439,11 @@ mod tests {
 
     #[test]
     fn which_key_opens_on_the_chosen_side() {
-        let left = render(120, 30, |f, a| draw_which_key(f, a, Side::Left, Menu::Root));
+        let left = render(120, 30, |f, a| {
+            draw_which_key(f, a, Side::Left, Menu::Root, &[])
+        });
         let right = render(120, 30, |f, a| {
-            draw_which_key(f, a, Side::Right, Menu::Root)
+            draw_which_key(f, a, Side::Right, Menu::Root, &[])
         });
         let corner = |screen: &str| {
             let row = screen.lines().find(|l| l.contains("Ctrl+B")).unwrap();
@@ -421,10 +456,19 @@ mod tests {
     #[test]
     fn which_key_shows_the_open_submenu() {
         let screen = render(120, 30, |f, a| {
-            draw_which_key(f, a, Side::Left, Menu::Floating)
+            draw_which_key(f, a, Side::Left, Menu::Floating, &[])
         });
         assert!(screen.contains("next floating pane"));
         assert!(!screen.contains("split side by side"));
+    }
+
+    #[test]
+    fn commands_menu_lists_the_users_commands() {
+        let commands = [('g', "lazygit".to_owned())];
+        let screen = render(80, 20, |f, a| {
+            draw_which_key(f, a, Side::Left, Menu::Commands, &commands)
+        });
+        assert!(screen.contains("lazygit") && screen.contains("cancel"));
     }
 
     #[test]

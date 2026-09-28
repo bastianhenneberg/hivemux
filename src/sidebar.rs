@@ -44,13 +44,27 @@ pub struct Data {
     pub workspaces: Vec<WorkspaceRow>,
     pub agents: Vec<AgentRow>,
     pub branch: Option<String>,
+    /// Changed files in the focused pane's repository, as `git status`
+    /// shows them: two status letters and the path from the repository root.
+    pub changes: Vec<Change>,
 }
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Change {
+    pub status: String,
+    pub path: String,
+}
+
+/// At most this many changed files are listed, the rest as a count.
+const MAX_CHANGES: usize = 12;
 
 /// What a click on a row does.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Target {
     Workspace(u8),
     Pane(PaneId),
+    /// The changed file at this index in `Data::changes`.
+    Change(usize),
 }
 
 /// The order agents are listed in: those that need the user first.
@@ -144,8 +158,63 @@ pub fn lines(data: &Data, width: u16) -> Vec<(Line<'static>, Option<Target>)> {
             ]),
             None,
         ));
+        for (i, change) in data.changes.iter().take(MAX_CHANGES).enumerate() {
+            let color = match change.status.trim() {
+                "??" => t.success,
+                s if s.contains('D') => t.danger,
+                _ => t.warning,
+            };
+            let status = format!("{:>2} ", change.status.trim());
+            let path = fit_end(&change.path, width.saturating_sub(3));
+            out.push((
+                Line::from(vec![
+                    Span::styled(status, Style::new().fg(color).add_modifier(Modifier::BOLD)),
+                    Span::raw(path),
+                ]),
+                Some(Target::Change(i)),
+            ));
+        }
+        if data.changes.len() > MAX_CHANGES {
+            out.push((
+                Line::styled(
+                    format!("   +{} more", data.changes.len() - MAX_CHANGES),
+                    dim,
+                ),
+                None,
+            ));
+        }
     }
     out
+}
+
+/// `text` cut to `room` characters keeping its end, for paths.
+fn fit_end(text: &str, room: usize) -> String {
+    let len = text.chars().count();
+    if len <= room {
+        return text.to_owned();
+    }
+    if room == 0 {
+        return String::new();
+    }
+    let tail: String = text.chars().skip(len - (room - 1)).collect();
+    format!("…{tail}")
+}
+
+/// Parses `git status --porcelain` output.
+pub fn parse_changes(porcelain: &str) -> Vec<Change> {
+    porcelain
+        .lines()
+        .filter(|line| line.len() > 3)
+        .map(|line| {
+            let path = &line[3..];
+            // A rename shows as `old -> new`, the new name is the file now.
+            let path = path.rsplit(" -> ").next().unwrap_or(path);
+            Change {
+                status: line[..2].to_owned(),
+                path: path.trim_matches('"').to_owned(),
+            }
+        })
+        .collect()
 }
 
 /// Draws the sidebar. `selected` is the index of the highlighted row among
@@ -291,6 +360,10 @@ mod tests {
                 focused: false,
             }],
             branch: Some("main".into()),
+            changes: vec![Change {
+                status: " M".into(),
+                path: "src/app.rs".into(),
+            }],
         }
     }
 
@@ -314,7 +387,13 @@ mod tests {
             .unwrap();
         assert!(texts[agent].contains("2·api") && texts[agent].ends_with("3m"));
         assert_eq!(rows[agent].1, Some(Target::Pane(7)));
-        assert!(texts.last().unwrap().contains("main"));
+        assert!(
+            texts
+                .iter()
+                .any(|t| t.starts_with("Git") && t.contains("main"))
+        );
+        assert_eq!(texts.last().unwrap(), " M src/app.rs");
+        assert_eq!(rows.last().unwrap().1, Some(Target::Change(0)));
     }
 
     #[test]
@@ -334,8 +413,22 @@ mod tests {
     fn targets_list_workspaces_then_agents() {
         assert_eq!(
             targets(&data()),
-            vec![Target::Workspace(1), Target::Workspace(2), Target::Pane(7)]
+            vec![
+                Target::Workspace(1),
+                Target::Workspace(2),
+                Target::Pane(7),
+                Target::Change(0)
+            ]
         );
+    }
+
+    #[test]
+    fn parses_git_status() {
+        let changes =
+            parse_changes(" M src/app.rs\n?? notes.md\nR  old.rs -> new.rs\nD  gone.rs\n");
+        let paths: Vec<&str> = changes.iter().map(|c| c.path.as_str()).collect();
+        assert_eq!(paths, vec!["src/app.rs", "notes.md", "new.rs", "gone.rs"]);
+        assert_eq!(changes[1].status, "??");
     }
 
     #[test]

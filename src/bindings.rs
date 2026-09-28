@@ -30,6 +30,7 @@ pub enum Command {
     PrevWorkspace,
     NextFloat,
     RenamePane,
+    ScrollbackEditor,
     Zoom,
     Swap(bool),
     Equalize,
@@ -77,16 +78,19 @@ pub enum Menu {
     Root,
     Floating,
     Workspaces,
+    /// The user's own commands from `[[commands]]` in the config.
+    Commands,
 }
 
 impl Menu {
-    pub const ALL: [Menu; 3] = [Menu::Root, Menu::Floating, Menu::Workspaces];
+    pub const ALL: [Menu; 4] = [Menu::Root, Menu::Floating, Menu::Workspaces, Menu::Commands];
 
     pub fn groups(self) -> &'static [Group] {
         match self {
             Menu::Root => &[Group::Panes, Group::Navigate, Group::Session],
             Menu::Floating => &[Group::Floating],
             Menu::Workspaces => &[Group::Workspaces],
+            Menu::Commands => &[Group::Commands],
         }
     }
 
@@ -96,6 +100,7 @@ impl Menu {
             Menu::Root => "",
             Menu::Floating => "f",
             Menu::Workspaces => "w",
+            Menu::Commands => "c",
         }
     }
 }
@@ -107,6 +112,7 @@ pub enum Group {
     Session,
     Floating,
     Workspaces,
+    Commands,
 }
 
 impl Group {
@@ -117,6 +123,7 @@ impl Group {
             Group::Session => "Session",
             Group::Floating => "Floating panes",
             Group::Workspaces => "Workspaces",
+            Group::Commands => "Your commands",
         }
     }
 
@@ -125,6 +132,7 @@ impl Group {
             Group::Panes | Group::Navigate | Group::Session => Menu::Root,
             Group::Floating => Menu::Floating,
             Group::Workspaces => Menu::Workspaces,
+            Group::Commands => Menu::Commands,
         }
     }
 }
@@ -270,6 +278,12 @@ pub const BINDINGS: &[Binding] = &[
         keys: &[(Key::plain(Char('[')), C::CopyMode)],
     },
     Binding {
+        label: "E",
+        description: "history in $EDITOR",
+        group: Group::Navigate,
+        keys: &[(Key::plain(Char('E')), C::ScrollbackEditor)],
+    },
+    Binding {
         label: "u",
         description: "scroll back a page",
         group: Group::Navigate,
@@ -363,6 +377,12 @@ pub const BINDINGS: &[Binding] = &[
         description: "into the sidebar",
         group: Group::Navigate,
         keys: &[(Key::plain(Char('e')), C::FocusSidebar)],
+    },
+    Binding {
+        label: "c",
+        description: "your commands…",
+        group: Group::Session,
+        keys: &[(Key::plain(Char('c')), C::Open(Menu::Commands))],
     },
     Binding {
         label: "b",
@@ -459,6 +479,20 @@ pub const BINDINGS: &[Binding] = &[
         label: "Esc",
         description: "cancel",
         group: Group::Floating,
+        keys: &[(Key::plain(Esc), C::Cancel)],
+    },
+    // The user's commands, after the prefix and `c`. The commands themselves
+    // come from the config, these are only the keys every menu has.
+    Binding {
+        label: "⌫",
+        description: "back",
+        group: Group::Commands,
+        keys: &[(Key::plain(KeyCode::Backspace), C::Back)],
+    },
+    Binding {
+        label: "Esc",
+        description: "cancel",
+        group: Group::Commands,
         keys: &[(Key::plain(Esc), C::Cancel)],
     },
     // Workspaces, after the prefix and `w`.

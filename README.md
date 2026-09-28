@@ -62,6 +62,8 @@ a time, attaching from a second terminal detaches the first.
 | `Ctrl+B` `a` | Jump to the agent that has waited longest for you, then to finished ones |
 | `Ctrl+B` `[` | Copy mode: scroll back with vim keys (`Ctrl-U`/`Ctrl-D`, `Ctrl-B`/`Ctrl-F`, `g`/`G`), `v` select, `y` copy, `q` quit |
 | `Ctrl+B` `u` | Copy mode, one page up right away (`PgUp` works too) |
+| `Ctrl+B` `E` | The pane's whole history in `$EDITOR` |
+| `Ctrl+B` `c` … | Your commands from the config, e.g. `g` for lazygit |
 | `Ctrl+B` `Ctrl+←↑↓→` | Resize by one cell (`Alt` for five), floating panes too |
 | `Ctrl+B` `q` | Quit menu: detach, close the pane or end the session |
 | `Ctrl+B` `d` | Detach, the shells keep running |
@@ -82,7 +84,8 @@ A pane closes when its shell exits, hivemux exits with the last pane.
 A sidebar on the right, like the rail in TUIOS, lists every workspace with its project (the
 focused pane's directory) and what its agents are doing, every agent across all workspaces with
 its workspace, directory and how long it has been in its state, and the git branch of the
-focused pane. Agents waiting for you come first. Click a row to go there. `Ctrl+B b` shows or
+focused pane with its changed files. Agents waiting for you come first. Enter or a click on a
+changed file shows its diff in a floating pane, `o` in the sidebar opens it in `$EDITOR`. Click a row to go there. `Ctrl+B b` shows or
 hides it (as in TUIOS), `Ctrl+B e` moves the keyboard into it, the settings put it left or right.
 
 ## Agents
@@ -166,6 +169,22 @@ path = "bottom"     # directory of the focused pane: "top", "bottom" or "off"
 Themes: `hivemux` is honey on your terminal's colours. `omarchy` follows the current Omarchy theme
 and changes with it. Any installed Omarchy theme (`catppuccin`, `gruvbox`, `tokyo-night`, …) can be
 picked by name, its `colors.toml` provides the colours. In the settings, ←/→ step through them.
+
+Your own commands go in the `Ctrl+B c` menu, run with `sh -c` in the focused pane's directory,
+in a floating pane unless `float = false`:
+
+```toml
+[[commands]]
+key = "g"
+name = "lazygit"
+command = "lazygit"
+
+[[commands]]
+key = "t"
+name = "tests"
+command = "cargo test"
+float = false
+```
 
 Elements on the same side share one line. New panes start in the directory of the focused
 pane.

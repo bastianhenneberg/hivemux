@@ -217,6 +217,8 @@ pub struct App {
     unseen: HashSet<PaneId>,
     /// Where the sidebar is drawn, if it is shown.
     sidebar: Option<Rect>,
+    /// The focused pane's repository, for the sidebar.
+    git: Option<GitState>,
     /// The focused pane as last seen, and the one before it, for `Ctrl+B ;`.
     current_focus: Option<PaneId>,
     last_focus: Option<PaneId>,
@@ -269,6 +271,7 @@ impl App {
             agents: HashMap::new(),
             unseen: HashSet::new(),
             sidebar: None,
+            git: None,
             current_focus: None,
             last_focus: None,
             state_path: persist::path().ok(),
@@ -442,6 +445,7 @@ impl App {
             self.sync_sizes();
             self.update_agents();
             self.track_focus();
+            self.refresh_git();
             self.follow_omarchy();
             self.save_state();
             self.render();
@@ -924,6 +928,11 @@ impl App {
             workspaces,
             agents,
             branch,
+            changes: self
+                .git
+                .as_ref()
+                .map(|g| g.changes.clone())
+                .unwrap_or_default(),
         }
     }
 
@@ -1051,6 +1060,11 @@ impl App {
     /// end the prefix.
     fn command(&mut self, menu: Menu, key: KeyEvent) -> Result<()> {
         let Some(command) = bindings::lookup(menu, key) else {
+            if menu == Menu::Commands
+                && let KeyCode::Char(c) = key.code
+            {
+                self.run_user_command(c);
+            }
             return Ok(());
         };
         match command {
@@ -1076,6 +1090,7 @@ impl App {
             Command::JumpToWaiting => self.jump_to_waiting(),
             Command::RenamePane => self.start_prompt(RenameTarget::Pane(self.ws.focus)),
             Command::Zoom => self.ws.toggle_zoom(),
+            Command::ScrollbackEditor => self.scrollback_in_editor(),
             Command::Swap(forward) => self.ws.swap(forward),
             Command::Equalize => self.ws.layout.equalize(),
             Command::LastPane => {
@@ -1376,6 +1391,7 @@ impl App {
                     match sidebar::target_at(&self.sidebar_data(), area, pos) {
                         Some(sidebar::Target::Workspace(n)) => self.switch_workspace(n),
                         Some(sidebar::Target::Pane(id)) => self.reveal(id),
+                        Some(sidebar::Target::Change(i)) => self.open_change(i, false),
                         None => {}
                     }
                     return Ok(());
@@ -1641,12 +1657,20 @@ impl App {
                 match target {
                     sidebar::Target::Workspace(n) => self.switch_workspace(n),
                     sidebar::Target::Pane(id) => self.reveal(id),
+                    sidebar::Target::Change(i) => self.open_change(i, false),
                 }
             }
-            KeyCode::Char('r') => self.start_prompt(match target {
-                sidebar::Target::Workspace(n) => RenameTarget::Workspace(n),
-                sidebar::Target::Pane(id) => RenameTarget::Pane(id),
-            }),
+            KeyCode::Char('o') => {
+                if let sidebar::Target::Change(i) = target {
+                    self.mode = Mode::Normal;
+                    self.open_change(i, true);
+                }
+            }
+            KeyCode::Char('r') => match target {
+                sidebar::Target::Workspace(n) => self.start_prompt(RenameTarget::Workspace(n)),
+                sidebar::Target::Pane(id) => self.start_prompt(RenameTarget::Pane(id)),
+                sidebar::Target::Change(_) => {}
+            },
             KeyCode::Char('x') => {
                 if let sidebar::Target::Pane(id) = target {
                     self.mode = Mode::Confirm(Action::ClosePane(id));
@@ -1783,7 +1807,105 @@ impl App {
         let id = self.next_id;
         self.next_id += 1;
         self.ws.split(axis, id);
-        self.spawn_into_ws(id, cwd);
+        self.spawn_into_ws(id, cwd, &[]);
+    }
+
+    /// Runs `script` with `sh -c` in a new floating pane, in `cwd`. When it
+    /// fails, the pane stays until Enter, so the error can be read.
+    fn float_script(&mut self, name: &str, script: &str, args: &[&str], cwd: Option<PathBuf>) {
+        let wrapped = format!(
+            "{script}\nstatus=$?\nif [ $status -ne 0 ]; then printf '\\n[exited with %s, Enter closes]' $status; read _; fi"
+        );
+        let mut command = vec!["sh".to_owned(), "-c".to_owned(), wrapped, "sh".to_owned()];
+        command.extend(args.iter().map(|a| a.to_string()));
+        let id = self.next_id;
+        self.next_id += 1;
+        self.ws.add_float(id, self.body);
+        self.spawn_into_ws(id, cwd, &command);
+        if let Some(pane) = self.panes.get_mut(&id) {
+            pane.name = Some(name.to_owned());
+        }
+    }
+
+    /// Runs the user's command bound to `key` in the commands menu.
+    fn run_user_command(&mut self, key: char) {
+        let Some(command) = self.config.commands.iter().find(|c| c.key == key).cloned() else {
+            return;
+        };
+        let cwd = self.focused_cwd();
+        if command.float {
+            self.float_script(&command.name, &command.command, &[], cwd);
+            return;
+        }
+        let id = self.next_id;
+        if !self.ws.split(Axis::Row, id) {
+            return;
+        }
+        self.next_id += 1;
+        let script = vec!["sh".to_owned(), "-c".to_owned(), command.command.clone()];
+        self.spawn_into_ws(id, cwd, &script);
+        if let Some(pane) = self.panes.get_mut(&id) {
+            pane.name = Some(command.name);
+        }
+    }
+
+    /// The diff of changed file `i` in a floating pane, or with `editor` the
+    /// file itself in `$EDITOR`.
+    fn open_change(&mut self, i: usize, editor: bool) {
+        let Some(git) = &self.git else { return };
+        let Some(change) = git.changes.get(i) else {
+            return;
+        };
+        let (root, path) = (git.root.clone(), change.path.clone());
+        if editor {
+            let name = format!("edit {path}");
+            self.float_script(&name, "\"${EDITOR:-nvim}\" \"$1\"", &[&path], Some(root));
+        } else {
+            let name = format!("diff {path}");
+            self.float_script(&name, DIFF_SCRIPT, &[&path], Some(root));
+        }
+    }
+
+    /// The focused pane's whole history in `$EDITOR`, like herdr's prefix+e.
+    fn scrollback_in_editor(&mut self) {
+        let id = self.ws.focus;
+        let Some(pane) = self.panes.get(&id) else {
+            return;
+        };
+        let text = pane.read(Some(usize::MAX));
+        let dir = self
+            .socket
+            .parent()
+            .map(PathBuf::from)
+            .unwrap_or_else(std::env::temp_dir);
+        let file = dir.join(format!("scrollback-{id}.txt"));
+        if let Err(e) = std::fs::write(&file, text + "\n") {
+            self.flash = Some(format!("cannot write the scrollback: {e}"));
+            return;
+        }
+        let file = file.to_string_lossy().into_owned();
+        self.float_script(
+            &format!("history {id}"),
+            "\"${EDITOR:-less}\" \"$1\"; rm -f \"$1\"",
+            &[&file],
+            self.focused_cwd(),
+        );
+    }
+
+    /// Keeps the focused pane's `git status` for the sidebar, at most every
+    /// two seconds and only while the sidebar shows.
+    fn refresh_git(&mut self) {
+        if self.sidebar.is_none() {
+            return;
+        }
+        let cwd = self.focused_cwd();
+        let fresh = self.git.as_ref().is_some_and(|g| {
+            Some(&g.cwd) == cwd.as_ref() && g.at.elapsed() < Duration::from_secs(2)
+        });
+        if fresh {
+            return;
+        }
+        self.git = cwd.and_then(|cwd| git_state(&cwd));
     }
 
     /// Starts a shell in a new floating pane in the middle of the screen.
@@ -1792,13 +1914,13 @@ impl App {
         let id = self.next_id;
         self.next_id += 1;
         self.ws.add_float(id, self.body);
-        self.spawn_into_ws(id, cwd);
+        self.spawn_into_ws(id, cwd, &[]);
     }
 
     /// Starts the shell for pane `id`, which was just added to the active
     /// workspace, sized to the area it got there. Takes the pane out again
     /// if the shell cannot be started.
-    fn spawn_into_ws(&mut self, id: PaneId, cwd: Option<PathBuf>) {
+    fn spawn_into_ws(&mut self, id: PaneId, cwd: Option<PathBuf>, command: &[String]) {
         let rect = self
             .ws
             .rects(self.body)
@@ -1812,7 +1934,7 @@ impl App {
                 rows: inner.height,
                 cols: inner.width,
                 cwd: cwd.as_deref(),
-                command: &[],
+                command,
                 socket: &self.socket,
             },
             self.events.clone(),
@@ -2075,7 +2197,13 @@ impl App {
 
         match self.mode {
             Mode::Prefix(menu) if self.config.which_key.enabled => {
-                menu::draw_which_key(frame, body, self.config.which_key.position, menu);
+                let commands: Vec<(char, String)> = self
+                    .config
+                    .commands
+                    .iter()
+                    .map(|c| (c.key, c.name.clone()))
+                    .collect();
+                menu::draw_which_key(frame, body, self.config.which_key.position, menu, &commands);
             }
             Mode::Settings(selected) => menu::draw_settings(
                 frame,
@@ -2339,7 +2467,7 @@ impl App {
             Mode::Sidebar(_) => {
                 spans.push(Span::styled(" SIDEBAR ", badge));
                 spans.push(Span::styled(
-                    "  j k move · Enter go · r name · x close · Esc back",
+                    "  j k move · Enter go/diff · o edit file · r name · x close · Esc back",
                     Style::new().fg(theme::current().accent),
                 ));
             }
@@ -2514,6 +2642,45 @@ fn split_sidebar(body: Rect, config: &config::Sidebar, focused: bool) -> (Rect, 
             }),
         ),
     }
+}
+
+/// Shows a file's changes against the last commit, or all of it when git
+/// does not track it yet, in a pager.
+const DIFF_SCRIPT: &str = "if git ls-files --error-unmatch -- \"$1\" >/dev/null 2>&1; \
+then git diff --color=always HEAD -- \"$1\"; \
+else git diff --color=always --no-index -- /dev/null \"$1\"; fi | less -R";
+
+/// A repository's changed files, as last read.
+struct GitState {
+    /// The directory it was read for.
+    cwd: PathBuf,
+    root: PathBuf,
+    changes: Vec<sidebar::Change>,
+    at: Instant,
+}
+
+/// Reads the repository containing `cwd`, `None` outside one.
+fn git_state(cwd: &std::path::Path) -> Option<GitState> {
+    let git = |args: &[&str]| {
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(cwd)
+            .args(args)
+            .stdin(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .output()
+            .ok()
+            .filter(|out| out.status.success())
+            .map(|out| String::from_utf8_lossy(&out.stdout).into_owned())
+    };
+    let root = PathBuf::from(git(&["rev-parse", "--show-toplevel"])?.trim());
+    let status = git(&["status", "--porcelain"])?;
+    Some(GitState {
+        cwd: cwd.to_owned(),
+        root,
+        changes: sidebar::parse_changes(&status),
+        at: Instant::now(),
+    })
 }
 
 /// Names are cut to this many characters.

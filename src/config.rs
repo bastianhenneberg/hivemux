@@ -107,6 +107,24 @@ pub struct Config {
     /// How to tell the user that an agent waits or finished while they
     /// looked elsewhere.
     pub notifications: Notifications,
+    /// The user's own commands, in the `Ctrl+B c` menu.
+    pub commands: Vec<UserCommand>,
+}
+
+/// A command of the user's, e.g. lazygit, started from the `Ctrl+B c` menu.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UserCommand {
+    pub key: char,
+    pub name: String,
+    /// Run with `sh -c` in the focused pane's directory.
+    pub command: String,
+    /// In a floating pane, or else split off the focused one.
+    #[serde(default = "yes")]
+    pub float: bool,
+}
+
+fn yes() -> bool {
+    true
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -145,6 +163,12 @@ impl Default for Config {
             bars: Bars::default(),
             sidebar: Sidebar::default(),
             notifications: Notifications::default(),
+            commands: vec![UserCommand {
+                key: 'g',
+                name: "lazygit".into(),
+                command: "lazygit".into(),
+                float: true,
+            }],
         }
     }
 }
@@ -322,6 +346,18 @@ pub const SETTINGS: &[Setting] = &[
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn commands_come_from_the_config() {
+        let config = Config::parse(
+            "[[commands]]\nkey = \"t\"\nname = \"btop\"\ncommand = \"btop\"\nfloat = false\n",
+        )
+        .unwrap();
+        assert_eq!(config.commands.len(), 1);
+        assert_eq!(config.commands[0].key, 't');
+        assert!(!config.commands[0].float);
+        assert_eq!(Config::default().commands[0].name, "lazygit");
+    }
 
     #[test]
     fn empty_file_means_defaults() {
