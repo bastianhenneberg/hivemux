@@ -16,7 +16,7 @@ use ratatui::crossterm::event::{
     Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
 use ratatui::layout::{Position, Rect};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Clear, Padding, Paragraph};
 use ratatui::{Frame, Terminal, TerminalOptions, Viewport};
@@ -26,11 +26,12 @@ use crate::bindings::{self, Command, Menu};
 use crate::config::{Bars, Config, Placement, SETTINGS};
 use crate::keys;
 use crate::layout::{Axis, MIN_PANE_SIZE, PaneId};
-use crate::menu::{self, HONEY};
+use crate::menu;
 use crate::pane::{Pane, Spawn};
 use crate::persist::{self, Saved, SavedPane};
 use crate::protocol::{ClientMsg, Reply, Request, ServerMsg};
 use crate::render::ScreenView;
+use crate::theme;
 use crate::workspace::Workspace;
 use crate::{clipboard, mouse};
 
@@ -201,6 +202,8 @@ pub struct App {
     agents: HashMap<PaneId, (AgentState, Instant)>,
     /// Where the layout is saved to survive a restart, see `persist`.
     state_path: Option<PathBuf>,
+    /// The Omarchy theme in use when the theme was last applied.
+    followed: Option<String>,
     /// What was saved last, to write only when something changed.
     last_saved: String,
     last_save_at: Instant,
@@ -244,6 +247,7 @@ impl App {
             socket,
             agents: HashMap::new(),
             state_path: persist::path().ok(),
+            followed: None,
             last_saved: String::new(),
             last_save_at: Instant::now(),
             events,
@@ -257,6 +261,7 @@ impl App {
             flash: None,
             quit: false,
         };
+        app.apply_theme();
         app.restore();
         if app.panes.is_empty() {
             app.start_fresh()?;
@@ -406,6 +411,7 @@ impl App {
             self.body = screen_layout(self.screen, &self.config.bars).body;
             self.sync_sizes();
             self.update_agents();
+            self.follow_omarchy();
             self.save_state();
             self.render();
 
@@ -930,7 +936,9 @@ impl App {
                 self.mode = Mode::Settings((selected + 1) % count);
             }
             KeyCode::Enter | KeyCode::Char(' ' | 'h' | 'l') | KeyCode::Left | KeyCode::Right => {
-                (SETTINGS[selected].cycle)(&mut self.config);
+                let forward = !matches!(key.code, KeyCode::Left | KeyCode::Char('h'));
+                (SETTINGS[selected].step)(&mut self.config, forward);
+                self.apply_theme();
                 self.config_note = Some(match self.config.save() {
                     Ok(path) => format!("saved to {}", tilde(&path)),
                     Err(e) => format!("not saved: {e:#}"),
@@ -1332,6 +1340,20 @@ impl App {
         None
     }
 
+    /// Draws with the configured theme from now on. When it follows
+    /// Omarchy, remembers which Omarchy theme that was.
+    fn apply_theme(&mut self) {
+        self.followed = theme::omarchy_current();
+        theme::set(theme::load(&self.config.theme));
+    }
+
+    /// Picks up a theme switch on the desktop when following Omarchy.
+    fn follow_omarchy(&mut self) {
+        if self.config.theme == theme::FOLLOW && theme::omarchy_current() != self.followed {
+            self.apply_theme();
+        }
+    }
+
     fn perform(&mut self, action: Action) {
         match action {
             Action::ClosePane(id) => self.close(id),
@@ -1565,9 +1587,9 @@ impl App {
             let floating = self.ws.is_floating(id);
             let state = self.agents.get(&id).map(|(state, _)| *state);
             let border = match (focused, state) {
-                (_, Some(AgentState::Blocked)) => Style::new().fg(Color::LightRed),
-                (true, _) => Style::new().fg(HONEY),
-                (false, _) => Style::new().fg(Color::DarkGray),
+                (_, Some(AgentState::Blocked)) => Style::new().fg(theme::current().danger),
+                (true, _) => Style::new().fg(theme::current().accent),
+                (false, _) => Style::new().fg(theme::current().subtle),
             };
 
             let mut title = vec![Span::raw(format!(
@@ -1703,7 +1725,7 @@ impl App {
         };
 
         let warning = Style::new()
-            .fg(Color::LightRed)
+            .fg(theme::current().danger)
             .add_modifier(Modifier::BOLD);
         let mut text = lines;
         text.push(Line::default());
@@ -1711,8 +1733,8 @@ impl App {
             Span::styled(
                 " y ",
                 Style::new()
-                    .fg(Color::Black)
-                    .bg(Color::LightRed)
+                    .fg(theme::current().on_accent)
+                    .bg(theme::current().danger)
                     .add_modifier(Modifier::BOLD),
             ),
             Span::raw(" yes    "),
@@ -1763,7 +1785,12 @@ impl App {
                 // Plain text with a coloured marker: dimmed text is close to
                 // invisible in some colour schemes.
                 let line = Line::from(vec![
-                    Span::styled("▸ ", Style::new().fg(HONEY).add_modifier(Modifier::BOLD)),
+                    Span::styled(
+                        "▸ ",
+                        Style::new()
+                            .fg(theme::current().accent)
+                            .add_modifier(Modifier::BOLD),
+                    ),
                     Span::raw(path),
                     Span::raw(" "),
                 ]);
@@ -1791,16 +1818,16 @@ impl App {
                     Span::styled(
                         format!(" {n} "),
                         Style::new()
-                            .fg(Color::Black)
-                            .bg(Color::LightRed)
+                            .fg(theme::current().on_accent)
+                            .bg(theme::current().danger)
                             .add_modifier(Modifier::BOLD),
                     )
                 } else if n == self.workspace {
                     Span::styled(
                         format!(" {n} "),
                         Style::new()
-                            .fg(HONEY)
-                            .bg(Color::DarkGray)
+                            .fg(theme::current().accent)
+                            .bg(theme::current().subtle)
                             .add_modifier(Modifier::BOLD),
                     )
                 } else {
@@ -1820,52 +1847,55 @@ impl App {
                 spans.push(Span::styled(" PREFIX ", badge));
                 spans.push(Span::styled(
                     "  ? all keys · Esc cancel",
-                    Style::new().fg(HONEY),
+                    Style::new().fg(theme::current().accent),
                 ));
             }
             Mode::Menu(_) => {
                 spans.push(Span::styled(" QUIT ", badge));
                 spans.push(Span::styled(
                     "  ↑↓ select · Enter or letter choose · Esc cancel",
-                    Style::new().fg(HONEY),
+                    Style::new().fg(theme::current().accent),
                 ));
             }
             Mode::Settings(_) => {
                 spans.push(Span::styled(" SETTINGS ", badge));
                 spans.push(Span::styled(
                     "  ↑↓ select · ←→ Enter change · Esc close",
-                    Style::new().fg(HONEY),
+                    Style::new().fg(theme::current().accent),
                 ));
             }
             Mode::Copy => {
                 spans.push(Span::styled(" COPY ", badge));
                 spans.push(Span::styled(
                     "  hjkl move · ^U ^D half page · ^B ^F page · g G top/bottom · v select · y copy · q quit",
-                    Style::new().fg(HONEY),
+                    Style::new().fg(theme::current().accent),
                 ));
             }
             Mode::Help => {
                 spans.push(Span::styled(" HELP ", badge));
-                spans.push(Span::styled("  any key closes", Style::new().fg(HONEY)));
+                spans.push(Span::styled(
+                    "  any key closes",
+                    Style::new().fg(theme::current().accent),
+                ));
             }
             Mode::Confirm(_) => {
                 spans.push(Span::styled(
                     " CONFIRM ",
                     Style::new()
-                        .fg(Color::Black)
-                        .bg(Color::LightRed)
+                        .fg(theme::current().on_accent)
+                        .bg(theme::current().danger)
                         .add_modifier(Modifier::BOLD),
                 ));
                 spans.push(Span::styled(
                     "  y yes · any other key cancels",
-                    Style::new().fg(Color::LightRed),
+                    Style::new().fg(theme::current().danger),
                 ));
             }
             Mode::Repeat(..) => {
                 spans.push(Span::styled(" REPEAT ", badge));
                 spans.push(Span::styled(
                     "  ←↑↓→ focus  ^←↑↓→ resize",
-                    Style::new().fg(HONEY),
+                    Style::new().fg(theme::current().accent),
                 ));
             }
             Mode::Normal if self.flash.is_some() => {
@@ -1880,7 +1910,10 @@ impl App {
                         state_style(AgentState::Blocked),
                     ));
                 } else {
-                    spans.push(Span::styled(format!("✓ {text}"), Style::new().fg(HONEY)));
+                    spans.push(Span::styled(
+                        format!("✓ {text}"),
+                        Style::new().fg(theme::current().accent),
+                    ));
                 }
             }
             Mode::Normal => {
@@ -1958,18 +1991,18 @@ const BADGE: &str = " ⬢ hivemux ";
 
 fn state_style(state: AgentState) -> Style {
     match state {
-        AgentState::Working => Style::new().fg(HONEY),
+        AgentState::Working => Style::new().fg(theme::current().warning),
         AgentState::Blocked => Style::new()
-            .fg(Color::LightRed)
+            .fg(theme::current().danger)
             .add_modifier(Modifier::BOLD),
-        AgentState::Idle => Style::new().fg(Color::LightGreen),
+        AgentState::Idle => Style::new().fg(theme::current().success),
     }
 }
 
 fn badge_style() -> Style {
     Style::new()
-        .fg(Color::Black)
-        .bg(HONEY)
+        .fg(theme::current().on_accent)
+        .bg(theme::current().accent)
         .add_modifier(Modifier::BOLD)
 }
 

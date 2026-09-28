@@ -9,6 +9,8 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
+use crate::theme;
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Side {
@@ -94,11 +96,23 @@ impl Bars {
     }
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
+    /// `hivemux`, `omarchy` to follow the desktop, or an Omarchy theme name.
+    pub theme: String,
     pub which_key: WhichKey,
     pub bars: Bars,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            theme: theme::BUILTIN.to_owned(),
+            which_key: WhichKey::default(),
+            bars: Bars::default(),
+        }
+    }
 }
 
 impl Config {
@@ -148,36 +162,63 @@ pub fn path() -> Result<PathBuf> {
     Ok(base.join("hivemux").join("config.toml"))
 }
 
-/// One line in the settings menu. Every setting has a small set of values,
-/// `cycle` steps to the next one.
+/// One line in the settings menu. `step` moves to the next value, or the
+/// previous one when `forward` is false.
 pub struct Setting {
     pub name: &'static str,
-    pub value: fn(&Config) -> &'static str,
-    pub cycle: fn(&mut Config),
+    pub value: fn(&Config) -> String,
+    pub step: fn(&mut Config, bool),
 }
 
 /// bottom → top → off → bottom, or without off for elements that must stay.
-fn next_placement(p: Placement, allow_off: bool) -> Placement {
-    match p {
-        Placement::Bottom => Placement::Top,
-        Placement::Top if allow_off => Placement::Off,
-        Placement::Top | Placement::Off => Placement::Bottom,
-    }
+fn step_placement(p: Placement, allow_off: bool, forward: bool) -> Placement {
+    let order: &[Placement] = if allow_off {
+        &[Placement::Bottom, Placement::Top, Placement::Off]
+    } else {
+        &[Placement::Bottom, Placement::Top]
+    };
+    step_in(order, &p, forward)
+}
+
+/// The item after (or before) `current` in `items`, wrapping around. The
+/// first item when `current` is not among them.
+fn step_in<T: Clone + PartialEq>(items: &[T], current: &T, forward: bool) -> T {
+    let len = items.len();
+    let next = match items.iter().position(|item| item == current) {
+        Some(i) if forward => (i + 1) % len,
+        Some(i) => (i + len - 1) % len,
+        None => 0,
+    };
+    items[next].clone()
 }
 
 pub const SETTINGS: &[Setting] = &[
     Setting {
+        name: "Theme",
+        value: |c| match c.theme.as_str() {
+            theme::FOLLOW => match theme::omarchy_current() {
+                Some(name) => format!("omarchy: {name}"),
+                None => theme::FOLLOW.to_owned(),
+            },
+            name => name.to_owned(),
+        },
+        step: |c, forward| c.theme = step_in(&theme::available(), &c.theme, forward),
+    },
+    Setting {
         name: "Which-key menu",
-        value: |c| if c.which_key.enabled { "on" } else { "off" },
-        cycle: |c| c.which_key.enabled = !c.which_key.enabled,
+        value: |c| if c.which_key.enabled { "on" } else { "off" }.to_owned(),
+        step: |c, _| c.which_key.enabled = !c.which_key.enabled,
     },
     Setting {
         name: "Which-key position",
-        value: |c| match c.which_key.position {
-            Side::Left => "left",
-            Side::Right => "right",
+        value: |c| {
+            match c.which_key.position {
+                Side::Left => "left",
+                Side::Right => "right",
+            }
+            .to_owned()
         },
-        cycle: |c| {
+        step: |c, _| {
             c.which_key.position = match c.which_key.position {
                 Side::Left => Side::Right,
                 Side::Right => Side::Left,
@@ -186,18 +227,18 @@ pub const SETTINGS: &[Setting] = &[
     },
     Setting {
         name: "Control bar",
-        value: |c| c.bars.control().name(),
-        cycle: |c| c.bars.control = next_placement(c.bars.control(), false),
+        value: |c| c.bars.control().name().to_owned(),
+        step: |c, forward| c.bars.control = step_placement(c.bars.control(), false, forward),
     },
     Setting {
         name: "Workspace tabs",
-        value: |c| c.bars.tabs.name(),
-        cycle: |c| c.bars.tabs = next_placement(c.bars.tabs, true),
+        value: |c| c.bars.tabs.name().to_owned(),
+        step: |c, forward| c.bars.tabs = step_placement(c.bars.tabs, true, forward),
     },
     Setting {
         name: "Path",
-        value: |c| c.bars.path.name(),
-        cycle: |c| c.bars.path = next_placement(c.bars.path, true),
+        value: |c| c.bars.path.name().to_owned(),
+        step: |c, forward| c.bars.path = step_placement(c.bars.path, true, forward),
     },
 ];
 
@@ -229,7 +270,7 @@ mod tests {
     fn round_trips_through_toml() {
         let mut config = Config::default();
         for setting in SETTINGS {
-            (setting.cycle)(&mut config);
+            (setting.step)(&mut config, true);
         }
         let text = toml::to_string_pretty(&config).unwrap();
         assert_eq!(Config::parse(&text).unwrap(), config);
@@ -241,14 +282,25 @@ mod tests {
         for setting in SETTINGS {
             let mut config = Config::default();
             let before = (setting.value)(&config);
-            (setting.cycle)(&mut config);
+            (setting.step)(&mut config, true);
             assert_ne!((setting.value)(&config), before, "{}", setting.name);
             let mut steps = 1;
             while (setting.value)(&config) != before {
-                (setting.cycle)(&mut config);
+                (setting.step)(&mut config, true);
                 steps += 1;
-                assert!(steps <= 3, "{} never comes back", setting.name);
+                assert!(steps <= 50, "{} never comes back", setting.name);
             }
+        }
+    }
+
+    #[test]
+    fn stepping_back_undoes_stepping_forward() {
+        for setting in SETTINGS {
+            let mut config = Config::default();
+            let before = (setting.value)(&config);
+            (setting.step)(&mut config, true);
+            (setting.step)(&mut config, false);
+            assert_eq!((setting.value)(&config), before, "{}", setting.name);
         }
     }
 
@@ -258,7 +310,7 @@ mod tests {
         assert_eq!(config.bars.control(), Placement::Bottom);
         let setting = SETTINGS.iter().find(|s| s.name == "Control bar").unwrap();
         for _ in 0..4 {
-            (setting.cycle)(&mut config);
+            (setting.step)(&mut config, true);
             assert_ne!(config.bars.control, Placement::Off);
         }
     }

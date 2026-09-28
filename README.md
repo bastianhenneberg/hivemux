@@ -126,6 +126,8 @@ Alacritty, Ghostty, foot and WezTerm do).
 The file can also be edited by hand, hivemux reads it when the server starts:
 
 ```toml
+theme = "omarchy"   # "hivemux", "omarchy" to follow the desktop, or an Omarchy theme name
+
 [which_key]
 enabled = true      # show the key menu after Ctrl+B
 position = "left"   # "left" or "right" bottom corner
@@ -135,6 +137,10 @@ control = "bottom"  # hivemux badge, mode and hints: "top" or "bottom"
 tabs = "bottom"     # workspace tabs: "top", "bottom" or "off"
 path = "bottom"     # directory of the focused pane: "top", "bottom" or "off"
 ```
+
+Themes: `hivemux` is honey on your terminal's colours. `omarchy` follows the current Omarchy theme
+and changes with it. Any installed Omarchy theme (`catppuccin`, `gruvbox`, `tokyo-night`, …) can be
+picked by name, its `colors.toml` provides the colours. In the settings, ←/→ step through them.
 
 Elements on the same side share one line. New panes start in the directory of the focused
 pane.

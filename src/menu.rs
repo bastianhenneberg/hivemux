@@ -3,14 +3,13 @@
 
 use ratatui::Frame;
 use ratatui::layout::{Margin, Rect};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Clear, Padding, Paragraph};
 
 use crate::bindings::{Binding, Group, Menu, PREFIX_LABEL, in_group};
 use crate::config::{Config, SETTINGS, Side};
-
-pub const HONEY: Color = Color::Rgb(250, 190, 0);
+use crate::theme;
 
 /// Space between the key column and the description, and between groups.
 const GAP: usize = 2;
@@ -102,7 +101,7 @@ fn draw_box(
 ) {
     let block = Block::bordered()
         .border_type(BorderType::Rounded)
-        .border_style(Style::new().fg(HONEY))
+        .border_style(Style::new().fg(theme::current().accent))
         .title(Span::styled(title, key_style()))
         .padding(Padding::horizontal(padding));
     frame.render_widget(Clear, popup);
@@ -151,7 +150,11 @@ pub fn draw_quit_menu(frame: &mut Frame, area: Rect, items: &[MenuItem], selecte
 
     let mut lines = Vec::new();
     for (i, item) in items.iter().enumerate() {
-        let color = if item.danger { Color::LightRed } else { HONEY };
+        let color = if item.danger {
+            theme::current().danger
+        } else {
+            theme::current().accent
+        };
         let title_pad = title_width - item.title.chars().count() + GAP;
         let mut spans = vec![
             Span::styled(
@@ -170,7 +173,7 @@ pub fn draw_quit_menu(frame: &mut Frame, area: Rect, items: &[MenuItem], selecte
         spans.push(Span::raw(" ".repeat(row_width.saturating_sub(used))));
         let mut line = Line::from(spans);
         if i == selected {
-            line = line.patch_style(Style::new().bg(Color::DarkGray));
+            line = line.patch_style(Style::new().bg(theme::current().subtle));
         }
         lines.push(line);
     }
@@ -212,21 +215,26 @@ pub fn draw_settings(
         .map(|s| s.name.chars().count())
         .max()
         .unwrap_or(0);
-    let value_width = 9;
+    let value_width = SETTINGS
+        .iter()
+        .map(|s| (s.value)(config).chars().count())
+        .max()
+        .unwrap_or(0)
+        .max(6);
 
     let mut lines = Vec::new();
     for (i, setting) in SETTINGS.iter().enumerate() {
         let pad = name_width - setting.name.chars().count() + GROUP_GAP;
-        let value = format!("‹ {:^5} ›", (setting.value)(config));
+        let value = format!("‹ {:^value_width$} ›", (setting.value)(config));
         let mut line = Line::from(vec![
             Span::raw(" "),
             Span::raw(setting.name),
             Span::raw(" ".repeat(pad)),
-            Span::styled(format!("{value:<value_width$}"), key_style()),
+            Span::styled(value, key_style()),
             Span::raw(" "),
         ]);
         if i == selected {
-            line = line.patch_style(Style::new().bg(Color::DarkGray));
+            line = line.patch_style(Style::new().bg(theme::current().subtle));
         }
         lines.push(line);
     }
@@ -261,7 +269,9 @@ pub fn draw_settings(
 }
 
 fn key_style() -> Style {
-    Style::new().fg(HONEY).add_modifier(Modifier::BOLD)
+    Style::new()
+        .fg(theme::current().accent)
+        .add_modifier(Modifier::BOLD)
 }
 
 /// A group's title followed by one line per binding, keys aligned.
@@ -398,7 +408,7 @@ mod tests {
         });
         for setting in SETTINGS {
             assert!(screen.contains(setting.name), "{} missing", setting.name);
-            assert!(screen.contains((setting.value)(&config)));
+            assert!(screen.contains(&(setting.value)(&config)));
         }
         assert!(screen.contains("saved"));
     }

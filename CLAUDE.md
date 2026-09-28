@@ -41,6 +41,10 @@ Projekt-Slug: `hivemux`
   daneben als `<socket>.state.json`, mit `HIVEMUX_STATE` frei wählbar). Gespeichert höchstens 1×/s
   bei Änderung, gelöscht am Ende von `App::run` (nur bewusstes Beenden kommt dort an). Test: Server
   mit `kill -9` töten und neu starten.
+- Farben nie fest verdrahten: `theme::current()` (accent, on_accent, subtle, danger, success,
+  warning). Themes aus Omarchys `colors.toml` (`~/.config/omarchy/themes`, `~/.local/share/omarchy/themes`,
+  aktuell: `~/.local/state/omarchy/current/`), `src/theme.rs`. Test des Live-Folgens mit falschem
+  `HOME` samt nachgebautem `.local/state/omarchy/current`.
 - Tastenbelegung nach dem Prefix steht **nur** in `src/bindings.rs` (`BINDINGS`). Which-Key-Menü,
   Hilfe-Overlay und `hivemux keys` lesen daraus, neue Befehle dort eintragen, nicht in `app.rs`.
 - Einstellungen: `src/config.rs` (serde/TOML, `SETTINGS`-Tabelle fürs Settings-Menü). Neue
