@@ -90,7 +90,7 @@ impl Menu {
 
     pub fn groups(self) -> &'static [Group] {
         match self {
-            Menu::Root => &[Group::Panes, Group::Navigate, Group::Session],
+            Menu::Root => &[Group::Panes, Group::Navigate, Group::View, Group::Session],
             Menu::Floating => &[Group::Floating],
             Menu::Workspaces => &[Group::Workspaces],
             Menu::Commands => &[Group::Commands],
@@ -112,7 +112,11 @@ impl Menu {
 pub enum Group {
     Panes,
     Navigate,
+    View,
     Session,
+    /// Keys of the main menu that the which-key popup lists only in its
+    /// footer: rarely needed, or variations of listed ones.
+    More,
     Floating,
     Workspaces,
     Commands,
@@ -122,17 +126,33 @@ impl Group {
     pub fn title(self) -> &'static str {
         match self {
             Group::Panes => "Panes",
-            Group::Navigate => "Navigate",
+            Group::Navigate => "Go to",
+            Group::View => "View",
             Group::Session => "Session",
+            Group::More => "More",
             Group::Floating => "Floating panes",
             Group::Workspaces => "Workspaces",
             Group::Commands => "Your commands",
         }
     }
 
+    /// The colour of the group's heading in menus.
+    pub fn color(self) -> ratatui::style::Color {
+        let t = crate::theme::current();
+        match self {
+            Group::Panes | Group::Workspaces => t.blue,
+            Group::Navigate | Group::Floating => t.cyan,
+            Group::View => t.orange,
+            Group::Session | Group::Commands => t.magenta,
+            Group::More => t.muted,
+        }
+    }
+
     pub fn menu(self) -> Menu {
         match self {
-            Group::Panes | Group::Navigate | Group::Session => Menu::Root,
+            Group::Panes | Group::Navigate | Group::View | Group::Session | Group::More => {
+                Menu::Root
+            }
             Group::Floating => Menu::Floating,
             Group::Workspaces => Menu::Workspaces,
             Group::Commands => Menu::Commands,
@@ -201,6 +221,7 @@ use Direction::{Down, Left, Right, Up};
 use KeyCode::{Char, Esc};
 
 pub const BINDINGS: &[Binding] = &[
+    // The main menu, after the prefix.
     Binding {
         label: "%",
         description: "split side by side",
@@ -253,19 +274,8 @@ pub const BINDINGS: &[Binding] = &[
         keys: &[(Key::plain(Char('f')), C::Open(Menu::Floating))],
     },
     Binding {
-        label: "Shift ←↑↓→",
-        description: "move floating pane",
-        group: Group::Panes,
-        keys: &[
-            (Key::shift(KeyCode::Left), C::Move(Left, 1)),
-            (Key::shift(KeyCode::Right), C::Move(Right, 1)),
-            (Key::shift(KeyCode::Up), C::Move(Up, 1)),
-            (Key::shift(KeyCode::Down), C::Move(Down, 1)),
-        ],
-    },
-    Binding {
         label: "←↑↓→",
-        description: "focus pane",
+        description: "pane there",
         group: Group::Navigate,
         keys: &[
             (Key::plain(KeyCode::Left), C::Focus(Left)),
@@ -275,53 +285,29 @@ pub const BINDINGS: &[Binding] = &[
         ],
     },
     Binding {
-        label: "[",
-        description: "copy mode",
-        group: Group::Navigate,
-        keys: &[(Key::plain(Char('[')), C::CopyMode)],
-    },
-    Binding {
-        label: "E",
-        description: "history in $EDITOR",
-        group: Group::Navigate,
-        keys: &[(Key::plain(Char('E')), C::ScrollbackEditor)],
-    },
-    Binding {
-        label: "u",
-        description: "scroll back a page",
+        label: "o ;",
+        description: "next / last pane",
         group: Group::Navigate,
         keys: &[
-            (Key::plain(Char('u')), C::ScrollBack),
-            (Key::plain(KeyCode::PageUp), C::ScrollBack),
+            (Key::plain(Char('o')), C::NextPane),
+            (Key::plain(Char(';')), C::LastPane),
         ],
     },
     Binding {
-        label: "a",
-        description: "waiting/done agent",
-        group: Group::Navigate,
-        keys: &[(Key::plain(Char('a')), C::JumpToWaiting)],
-    },
-    Binding {
         label: "g",
-        description: "go to any pane…",
+        description: "any pane…",
         group: Group::Navigate,
         keys: &[(Key::plain(Char('g')), C::PickPane)],
     },
     Binding {
-        label: ";",
-        description: "last pane",
+        label: "a",
+        description: "waiting agent",
         group: Group::Navigate,
-        keys: &[(Key::plain(Char(';')), C::LastPane)],
-    },
-    Binding {
-        label: "o",
-        description: "next pane",
-        group: Group::Navigate,
-        keys: &[(Key::plain(Char('o')), C::NextPane)],
+        keys: &[(Key::plain(Char('a')), C::JumpToWaiting)],
     },
     Binding {
         label: "1-9",
-        description: "go to workspace",
+        description: "workspace",
         group: Group::Navigate,
         keys: &[
             (Key::plain(Char('1')), C::Workspace(1)),
@@ -342,30 +328,41 @@ pub const BINDINGS: &[Binding] = &[
         keys: &[(Key::plain(Char('w')), C::Open(Menu::Workspaces))],
     },
     Binding {
-        label: "Ctrl ←↑↓→",
-        description: "resize by 1",
-        group: Group::Navigate,
+        label: "[",
+        description: "copy mode",
+        group: Group::View,
+        keys: &[(Key::plain(Char('[')), C::CopyMode)],
+    },
+    Binding {
+        label: "u",
+        description: "page up",
+        group: Group::View,
         keys: &[
-            (Key::ctrl(KeyCode::Left), C::Resize(Left, 1)),
-            (Key::ctrl(KeyCode::Right), C::Resize(Right, 1)),
-            (Key::ctrl(KeyCode::Up), C::Resize(Up, 1)),
-            (Key::ctrl(KeyCode::Down), C::Resize(Down, 1)),
+            (Key::plain(Char('u')), C::ScrollBack),
+            (Key::plain(KeyCode::PageUp), C::ScrollBack),
         ],
     },
     Binding {
-        label: "Alt ←↑↓→",
-        description: "resize by 5",
-        group: Group::Navigate,
-        keys: &[
-            (Key::alt(KeyCode::Left), C::Resize(Left, 5)),
-            (Key::alt(KeyCode::Right), C::Resize(Right, 5)),
-            (Key::alt(KeyCode::Up), C::Resize(Up, 5)),
-            (Key::alt(KeyCode::Down), C::Resize(Down, 5)),
-        ],
+        label: "E",
+        description: "history in $EDITOR",
+        group: Group::View,
+        keys: &[(Key::plain(Char('E')), C::ScrollbackEditor)],
+    },
+    Binding {
+        label: "b",
+        description: "sidebar on/off",
+        group: Group::View,
+        keys: &[(Key::plain(Char('b')), C::ToggleSidebar)],
+    },
+    Binding {
+        label: "e",
+        description: "into the sidebar",
+        group: Group::View,
+        keys: &[(Key::plain(Char('e')), C::FocusSidebar)],
     },
     Binding {
         label: "q",
-        description: "quit menu",
+        description: "quit…",
         group: Group::Session,
         keys: &[(Key::plain(Char('q')), C::SessionMenu)],
     },
@@ -376,18 +373,6 @@ pub const BINDINGS: &[Binding] = &[
         keys: &[(Key::plain(Char('d')), C::Detach)],
     },
     Binding {
-        label: "Q",
-        description: "quit hivemux",
-        group: Group::Session,
-        keys: &[(Key::plain(Char('Q')), C::Quit)],
-    },
-    Binding {
-        label: "e",
-        description: "into the sidebar",
-        group: Group::Navigate,
-        keys: &[(Key::plain(Char('e')), C::FocusSidebar)],
-    },
-    Binding {
         label: "S",
         description: "sessions…",
         group: Group::Session,
@@ -395,15 +380,9 @@ pub const BINDINGS: &[Binding] = &[
     },
     Binding {
         label: "c",
-        description: "your commands…",
+        description: "commands…",
         group: Group::Session,
         keys: &[(Key::plain(Char('c')), C::Open(Menu::Commands))],
-    },
-    Binding {
-        label: "b",
-        description: "show/hide sidebar",
-        group: Group::Session,
-        keys: &[(Key::plain(Char('b')), C::ToggleSidebar)],
     },
     Binding {
         label: ",",
@@ -412,27 +391,60 @@ pub const BINDINGS: &[Binding] = &[
         keys: &[(Key::plain(Char(',')), C::Settings)],
     },
     Binding {
-        label: "R",
-        description: "reload config",
-        group: Group::Session,
-        keys: &[(Key::plain(Char('R')), C::ReloadConfig)],
-    },
-    Binding {
         label: "?",
         description: "all keys",
         group: Group::Session,
         keys: &[(Key::plain(Char('?')), C::Help)],
     },
+    // Listed in the footer only.
+    Binding {
+        label: "Ctrl/Alt ←↑↓→",
+        description: "resize",
+        group: Group::More,
+        keys: &[
+            (Key::ctrl(KeyCode::Left), C::Resize(Left, 1)),
+            (Key::ctrl(KeyCode::Right), C::Resize(Right, 1)),
+            (Key::ctrl(KeyCode::Up), C::Resize(Up, 1)),
+            (Key::ctrl(KeyCode::Down), C::Resize(Down, 1)),
+            (Key::alt(KeyCode::Left), C::Resize(Left, 5)),
+            (Key::alt(KeyCode::Right), C::Resize(Right, 5)),
+            (Key::alt(KeyCode::Up), C::Resize(Up, 5)),
+            (Key::alt(KeyCode::Down), C::Resize(Down, 5)),
+        ],
+    },
+    Binding {
+        label: "Shift ←↑↓→",
+        description: "move float",
+        group: Group::More,
+        keys: &[
+            (Key::shift(KeyCode::Left), C::Move(Left, 1)),
+            (Key::shift(KeyCode::Right), C::Move(Right, 1)),
+            (Key::shift(KeyCode::Up), C::Move(Up, 1)),
+            (Key::shift(KeyCode::Down), C::Move(Down, 1)),
+        ],
+    },
+    Binding {
+        label: "Q",
+        description: "quit hivemux",
+        group: Group::More,
+        keys: &[(Key::plain(Char('Q')), C::Quit)],
+    },
+    Binding {
+        label: "R",
+        description: "reload config",
+        group: Group::More,
+        keys: &[(Key::plain(Char('R')), C::ReloadConfig)],
+    },
     Binding {
         label: PREFIX_LABEL,
-        description: "send Ctrl+B",
-        group: Group::Session,
+        description: "sends Ctrl+B",
+        group: Group::More,
         keys: &[(PREFIX, C::SendPrefix)],
     },
     Binding {
         label: "Esc",
         description: "cancel",
-        group: Group::Session,
+        group: Group::More,
         keys: &[(Key::plain(Esc), C::Cancel)],
     },
     // Floating panes, after the prefix and `f`.
@@ -594,7 +606,11 @@ pub fn reference() -> String {
         .max()
         .unwrap_or(0);
     let mut out = format!("Press {PREFIX_LABEL}, then:\n");
-    for &group in Menu::ALL.iter().flat_map(|m| m.groups()) {
+    let groups = Menu::ALL
+        .iter()
+        .flat_map(|m| m.groups().iter().copied())
+        .chain([Group::More]);
+    for group in groups {
         match group.menu() {
             Menu::Root => out.push_str(&format!("\n{}\n", group.title())),
             menu => out.push_str(&format!(

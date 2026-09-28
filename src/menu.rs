@@ -26,10 +26,23 @@ pub fn draw_which_key(
 ) {
     let area = inset(area);
     // Border and one column of padding on each side.
-    let lines = match menu {
+    let max_width = usize::from(area.width).saturating_sub(4);
+    let mut lines = match menu {
         Menu::Commands => command_lines(commands),
-        menu => groups(menu.groups(), usize::from(area.width).saturating_sub(4)),
+        menu => groups(menu.groups(), max_width),
     };
+    // Rare keys of the main menu in one quiet line at the bottom.
+    // It wraps at the width of the groups above, so it never widens the box.
+    if menu == Menu::Root {
+        let grid = lines
+            .iter()
+            .map(Line::width)
+            .max()
+            .unwrap_or(0)
+            .min(max_width);
+        lines.push(Line::default());
+        lines.extend(footer_lines(grid));
+    }
 
     let width = lines.iter().map(Line::width).max().unwrap_or(0) as u16 + 4;
     let height = lines.len() as u16 + 2;
@@ -63,7 +76,9 @@ pub fn draw_help(frame: &mut Frame, area: Rect, scroll: u16) {
     ];
     // Border and two columns of padding on each side.
     let max_width = usize::from(area.width).saturating_sub(6);
-    lines.extend(groups(Menu::Root.groups(), max_width));
+    let mut root = Menu::Root.groups().to_vec();
+    root.push(Group::More);
+    lines.extend(groups(&root, max_width));
     let submenus: Vec<Group> = Menu::ALL
         .iter()
         .filter(|m| **m != Menu::Root)
@@ -146,18 +161,62 @@ fn draw_box_scrolled(
 
 /// All groups, side by side when they fit into `max_width`, stacked
 /// otherwise.
+/// The groups in a grid: as many side by side as fit into `max_width`,
+/// the rest in further rows.
 fn groups(groups: &[Group], max_width: usize) -> Vec<Line<'static>> {
     let columns: Vec<Vec<Line>> = groups.iter().map(|&g| group_lines(g)).collect();
     let widths: Vec<usize> = columns
         .iter()
         .map(|lines| lines.iter().map(Line::width).max().unwrap_or(0))
         .collect();
-    let side_by_side = widths.iter().sum::<usize>() + GROUP_GAP * (widths.len() - 1);
-    if side_by_side <= max_width {
-        beside(columns, &widths)
-    } else {
-        stacked(columns)
+    let fits = |per_row: usize| {
+        widths
+            .chunks(per_row)
+            .all(|row| row.iter().sum::<usize>() + GROUP_GAP * (row.len() - 1) <= max_width)
+    };
+    let per_row = (1..=columns.len()).rev().find(|&n| fits(n)).unwrap_or(1);
+    let mut lines = Vec::new();
+    for (i, (row, row_widths)) in columns
+        .chunks(per_row)
+        .zip(widths.chunks(per_row))
+        .enumerate()
+    {
+        if i > 0 {
+            lines.push(Line::default());
+        }
+        lines.extend(beside(row.to_vec(), row_widths));
     }
+    lines
+}
+
+/// The main menu's rare keys as `key what · key what`, wrapped to
+/// `max_width`.
+fn footer_lines(max_width: usize) -> Vec<Line<'static>> {
+    let muted = Style::new().fg(theme::current().muted);
+    let items: Vec<(String, String)> = in_group(Group::More)
+        .map(|b| (b.label.to_owned(), b.description.to_owned()))
+        .collect();
+    let mut lines = Vec::new();
+    let mut spans: Vec<Span> = Vec::new();
+    let mut width = 0;
+    for (label, description) in items {
+        let item_width = label.chars().count() + 1 + description.chars().count();
+        if width > 0 && width + 3 + item_width > max_width {
+            lines.push(Line::from(std::mem::take(&mut spans)));
+            width = 0;
+        }
+        if width > 0 {
+            spans.push(Span::styled(" · ", muted));
+            width += 3;
+        }
+        spans.push(Span::styled(label, key_style()));
+        spans.push(Span::styled(format!(" {description}"), muted));
+        width += item_width;
+    }
+    if !spans.is_empty() {
+        lines.push(Line::from(spans));
+    }
+    lines
 }
 
 /// An entry of the quit menu.
@@ -369,14 +428,30 @@ fn group_lines(group: Group) -> Vec<Line<'static>> {
     };
     let mut lines = vec![Line::styled(
         title,
-        Style::new().add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
+        Style::new()
+            .fg(group.color())
+            .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
     )];
+    // Entries that open a submenu stand out in one colour everywhere.
+    let submenu = Style::new().fg(theme::current().magenta);
     for binding in bindings {
         let pad = key_width - binding.label.chars().count() + GAP;
+        let opens_menu = binding.description.ends_with('…');
         lines.push(Line::from(vec![
-            Span::styled(binding.label, key_style()),
+            Span::styled(
+                binding.label,
+                if opens_menu {
+                    submenu.add_modifier(Modifier::BOLD)
+                } else {
+                    key_style()
+                },
+            ),
             Span::raw(" ".repeat(pad)),
-            Span::raw(binding.description),
+            if opens_menu {
+                Span::styled(binding.description, submenu)
+            } else {
+                Span::raw(binding.description)
+            },
         ]));
     }
     lines
@@ -399,17 +474,6 @@ fn beside(columns: Vec<Vec<Line<'static>>>, widths: &[usize]) -> Vec<Line<'stati
             Line::from(spans)
         })
         .collect()
-}
-
-fn stacked(columns: Vec<Vec<Line<'static>>>) -> Vec<Line<'static>> {
-    let mut lines = Vec::new();
-    for (i, column) in columns.into_iter().enumerate() {
-        if i > 0 {
-            lines.push(Line::default());
-        }
-        lines.extend(column);
-    }
-    lines
 }
 
 #[cfg(test)]
@@ -441,22 +505,24 @@ mod tests {
             .lines()
             .find(|l| l.contains("Panes"))
             .expect("Panes header");
-        assert!(row.contains("Navigate") && row.contains("Session"));
+        assert!(row.contains("Go to") && row.contains("View") && row.contains("Session"));
         assert!(screen.contains("split side by side"));
-        assert!(screen.contains("quit hivemux"));
+        // Rare keys sit in the footer, below the groups.
+        let footer = screen.split_once("resize").expect("footer").1;
+        assert!(footer.contains("move float") && footer.contains("cancel"));
     }
 
     #[test]
     fn which_key_stacks_on_a_narrow_screen() {
-        let screen = render(40, 40, |f, a| {
+        let screen = render(40, 60, |f, a| {
             draw_which_key(f, a, Side::Left, Menu::Root, &[])
         });
         let row = screen
             .lines()
             .find(|l| l.contains("Panes"))
             .expect("Panes header");
-        assert!(!row.contains("Navigate"));
-        assert!(screen.contains("Navigate") && screen.contains("Session"));
+        assert!(!row.contains("Go to"));
+        assert!(screen.contains("Go to") && screen.contains("View") && screen.contains("Session"));
     }
 
     #[test]
@@ -468,7 +534,7 @@ mod tests {
             draw_which_key(f, a, Side::Right, Menu::Root, &[])
         });
         let corner = |screen: &str| {
-            let row = screen.lines().find(|l| l.contains("Ctrl+B")).unwrap();
+            let row = screen.lines().find(|l| l.contains("⬢ Ctrl+B")).unwrap();
             row.chars().position(|c| c == '╭').unwrap()
         };
         assert_eq!(corner(&left), 1);
