@@ -32,6 +32,10 @@ Commands:
   (none)        attach to the session, or start it
   attach        attach to the session (`attach -t NAME` works too)
   ls            list the running sessions
+  save [NAME]   save every running session's layout in one save file (default `last`)
+  restore [NAME | --list]
+                start the sessions of a save file that do not run (default `last`,
+                which every session ending on purpose updates)
   rename-session NAME
                 rename the session (`-s OLD rename-session NEW` for another)
   kill-server   shut down the session's server and every pane in it
@@ -103,6 +107,8 @@ fn main() -> Result<()> {
         ["wait", ..] => cli::wait(&args[1..]),
         ["hooks"] => cli::hooks(),
         ["update"] => cli::update(),
+        ["save", ..] => cli::save(&args[1..]),
+        ["restore", ..] => cli::restore(&args[1..]),
         ["rename-session", ..] => cli::rename_session(&args[1..]),
         ["help" | "-h" | "--help"] => {
             println!("{USAGE}");

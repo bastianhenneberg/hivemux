@@ -75,6 +75,8 @@ pub enum Request {
     },
     /// Rename the session.
     RenameSession { name: String },
+    /// The session's layout as `persist` saves it, for save files.
+    Snapshot,
     /// Replace the server with the binary at `exe`, keeping the session,
     /// see `upgrade`.
     Upgrade { exe: PathBuf },

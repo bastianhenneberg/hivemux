@@ -391,6 +391,14 @@ impl App {
         for link in &app.old_sockets {
             let _ = std::fs::remove_file(link);
         }
+        // Ended on purpose: kept in the save file `last` instead, from where
+        // `hivemux restore` brings it back. A session whose last shell
+        // exited has nothing to keep.
+        if !app.panes.is_empty()
+            && let Err(e) = persist::keep_in_last(&protocol::session_name(), app.saved())
+        {
+            eprintln!("could not keep the session in the last save: {e:#}");
+        }
         // The session was ended on purpose, there is nothing to bring back.
         // A server that dies with the machine never gets here.
         if let Some(path) = &app.state_path {
@@ -867,6 +875,7 @@ impl App {
                 workspace,
                 cwd,
             } => self.new_pane(&command, float, workspace, cwd),
+            Request::Snapshot => serde_json::to_value(self.saved()).map_err(|e| e.to_string()),
             Request::RenameSession { name } => {
                 self.rename_session(&name)?;
                 Ok(serde_json::json!({ "session": name }))
@@ -2179,6 +2188,14 @@ impl App {
             hint: "`hivemux -s NAME` does the same".into(),
             danger: false,
         });
+        if let Some(hint) = restorable() {
+            items.push(menu::MenuItem {
+                key: 'L',
+                title: "restore last save".into(),
+                hint,
+                danger: false,
+            });
+        }
         (names, items)
     }
 
@@ -2201,7 +2218,7 @@ impl App {
                 return;
             }
             KeyCode::Enter => selected,
-            KeyCode::Char('n') => count - 1,
+            KeyCode::Char('n') => names.len(),
             KeyCode::Char('r') => {
                 if let Some(name) = names.get(selected) {
                     self.prompt = Some(Prompt {
@@ -2222,12 +2239,18 @@ impl App {
         match names.get(pick) {
             Some(name) if *name == protocol::session_name() => {}
             Some(name) => self.switch_session(name.clone()),
-            None => {
+            None if pick == names.len() => {
                 self.prompt = Some(Prompt {
                     purpose: PromptFor::NewSession,
                     text: String::new(),
                 });
                 self.mode = Mode::Prompt;
+            }
+            None => {
+                self.flash = Some(match crate::client::restore_hive(persist::LAST) {
+                    Ok(started) => format!("restored {}, Ctrl+B S switches", started.join(", ")),
+                    Err(e) => format!("not restored: {e:#}"),
+                });
             }
         }
     }
@@ -3797,6 +3820,23 @@ fn find_in_rows(
 const MAX_NAME: usize = 32;
 
 /// A workspace tab: its number, and its name if it has one.
+/// For the sessions menu: which sessions of the save `last` do not run
+/// and could be restored, `None` if none.
+fn restorable() -> Option<String> {
+    if std::env::var_os("HIVEMUX_SOCKET").is_some() {
+        return None;
+    }
+    let hive = persist::load_hive(persist::LAST).ok()??;
+    let running = protocol::sessions();
+    let names: Vec<&str> = hive
+        .sessions
+        .keys()
+        .map(String::as_str)
+        .filter(|name| !running.iter().any(|r| r == name))
+        .collect();
+    (!names.is_empty()).then(|| names.join(", "))
+}
+
 /// The button after the tabs that opens a new workspace.
 const NEW_TAB: &str = " + ";
 

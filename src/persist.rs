@@ -86,19 +86,122 @@ pub fn path() -> Result<PathBuf> {
     if let Some(socket) = std::env::var_os("HIVEMUX_SOCKET") {
         return Ok(PathBuf::from(socket).with_extension("state.json"));
     }
+    path_for(&crate::protocol::session_name())
+}
+
+/// Where session `name` is saved, without the overrides of `path`.
+pub fn path_for(name: &str) -> Result<PathBuf> {
+    let file = if name == crate::protocol::DEFAULT_SESSION {
+        "session.json".to_owned()
+    } else {
+        format!("{name}.json")
+    };
+    Ok(state_dir()?.join(file))
+}
+
+/// `$XDG_STATE_HOME/hivemux`, falling back to `~/.local/state/hivemux`.
+fn state_dir() -> Result<PathBuf> {
     let base = match std::env::var_os("XDG_STATE_HOME") {
         Some(dir) => PathBuf::from(dir),
         None => {
             PathBuf::from(std::env::var_os("HOME").context("HOME is not set")?).join(".local/state")
         }
     };
-    let name = crate::protocol::session_name();
-    let file = if name == crate::protocol::DEFAULT_SESSION {
-        "session.json".to_owned()
-    } else {
-        format!("{name}.json")
+    Ok(base.join("hivemux"))
+}
+
+/// A save file: the layouts of several sessions at once, like a
+/// tmux-resurrect save. `last` is kept up to date by every session that
+/// ends on purpose, others are made with `hivemux save NAME`.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct Hive {
+    pub sessions: BTreeMap<String, HiveSession>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct HiveSession {
+    /// When it was saved, in seconds since 1970.
+    pub saved_at: u64,
+    pub layout: Saved,
+}
+
+/// The save every session ending on purpose puts itself into.
+pub const LAST: &str = "last";
+
+/// Where save files go: `saves` next to the session files, or next to the
+/// socket or state file a test set.
+pub fn saves_dir() -> Result<PathBuf> {
+    if let Some(path) = std::env::var_os("HIVEMUX_STATE") {
+        return Ok(PathBuf::from(path).with_extension("saves"));
+    }
+    if let Some(socket) = std::env::var_os("HIVEMUX_SOCKET") {
+        return Ok(PathBuf::from(socket).with_extension("saves"));
+    }
+    Ok(state_dir()?.join("saves"))
+}
+
+/// The save file called `name`.
+pub fn save_path(name: &str) -> Result<PathBuf> {
+    if !crate::protocol::valid_session_name(name) {
+        anyhow::bail!("{name:?} is no save name: letters, digits, - and _ only");
+    }
+    Ok(saves_dir()?.join(format!("{name}.json")))
+}
+
+pub fn load_hive(name: &str) -> Result<Option<Hive>> {
+    let path = save_path(name)?;
+    let text = match fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e.into()),
     };
-    Ok(base.join("hivemux").join(file))
+    let hive: Hive =
+        serde_json::from_str(&text).with_context(|| format!("cannot read {}", path.display()))?;
+    Ok(Some(hive))
+}
+
+pub fn write_hive(name: &str, hive: &Hive) -> Result<PathBuf> {
+    let path = save_path(name)?;
+    write(&path, &serde_json::to_string_pretty(hive)?)?;
+    Ok(path)
+}
+
+/// Puts `session`'s layout into the save `last`, next to the sessions that
+/// are there already.
+pub fn keep_in_last(session: &str, layout: Saved) -> Result<()> {
+    let mut hive = load_hive(LAST).ok().flatten().unwrap_or_default();
+    hive.sessions.insert(
+        session.to_owned(),
+        HiveSession {
+            saved_at: now(),
+            layout,
+        },
+    );
+    write_hive(LAST, &hive)?;
+    Ok(())
+}
+
+/// The save files by name.
+pub fn saves() -> Vec<String> {
+    let Ok(entries) = saves_dir().and_then(|dir| Ok(fs::read_dir(dir)?)) else {
+        return Vec::new();
+    };
+    let mut names: Vec<String> = entries
+        .flatten()
+        .filter_map(|e| {
+            let name = e.file_name().to_str()?.strip_suffix(".json")?.to_owned();
+            Some(name)
+        })
+        .collect();
+    names.sort();
+    names
+}
+
+/// Seconds since 1970.
+pub fn now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
 }
 
 pub fn to_json(saved: &Saved) -> Result<String> {
@@ -212,5 +315,22 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(aider.resume_command(), None);
+    }
+
+    #[test]
+    fn last_collects_sessions_that_ended() {
+        let dir = std::env::temp_dir().join(format!("hivemux-saves-{}", std::process::id()));
+        // SAFETY: the only test that sets HIVEMUX_STATE.
+        unsafe { std::env::set_var("HIVEMUX_STATE", dir.join("state.json")) };
+        keep_in_last("work", sample()).unwrap();
+        keep_in_last("play", Saved::new(1, BTreeMap::new(), BTreeMap::new())).unwrap();
+        keep_in_last("work", sample()).unwrap();
+        let hive = load_hive(LAST).unwrap().unwrap();
+        assert_eq!(hive.sessions.keys().collect::<Vec<_>>(), ["play", "work"]);
+        assert_eq!(hive.sessions["work"].layout, sample());
+        assert_eq!(saves(), ["last"]);
+        assert!(save_path("../evil").is_err());
+        unsafe { std::env::remove_var("HIVEMUX_STATE") };
+        let _ = fs::remove_dir_all(dir);
     }
 }

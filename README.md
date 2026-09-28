@@ -162,6 +162,14 @@ Codex sessions known from the hooks are resumed (`claude --resume <id>`). Proces
 contents cannot survive a restart. Ending the session on purpose (`Ctrl+B Q`, `kill-server`, or
 exiting the last shell) deletes the file.
 
+Save files hold the layouts of several sessions at once, like tmux-resurrect. Every session
+that ends on purpose (`Ctrl+B Q`, `kill-server`) puts its layout into the save `last`, so
+`hivemux restore` brings back everything that was open, each session as its own server again;
+`Ctrl+B S` offers the same as *restore last save*. `hivemux save NAME` keeps the sessions
+running now under a name of your own, `hivemux restore NAME` starts them, `hivemux restore
+--list` shows what there is. Sessions already running are left alone. The files live in
+`~/.local/state/hivemux/saves/`, plain JSON, easy to copy or back up.
+
 ## Images
 
 Programs that show images with the kitty graphics protocol (icat, chafa, yazi, timg, mpv's

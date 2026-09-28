@@ -351,6 +351,63 @@ pub fn rename_session(args: &[String]) -> Result<()> {
     Ok(())
 }
 
+/// `hivemux save [NAME]`: every running session's layout in one save
+/// file, `last` without a name.
+pub fn save(args: &[String]) -> Result<()> {
+    let name = match args {
+        [] => crate::persist::LAST,
+        [name] => name.as_str(),
+        _ => bail!("usage: hivemux save [NAME]"),
+    };
+    let hive = client::snapshot_all()?;
+    if hive.sessions.is_empty() {
+        bail!("no session is running");
+    }
+    let path = crate::persist::write_hive(name, &hive)?;
+    let names: Vec<&str> = hive.sessions.keys().map(String::as_str).collect();
+    println!("saved {} to {}", names.join(", "), path.display());
+    Ok(())
+}
+
+/// `hivemux restore [NAME]`: starts the sessions of a save file that do
+/// not run, `last` without a name. `--list` shows the save files.
+pub fn restore(args: &[String]) -> Result<()> {
+    match args {
+        [flag] if flag == "--list" => {
+            for name in crate::persist::saves() {
+                let Ok(Some(hive)) = crate::persist::load_hive(&name) else {
+                    continue;
+                };
+                let sessions: Vec<String> = hive
+                    .sessions
+                    .iter()
+                    .map(|(session, saved)| {
+                        let age = crate::persist::now().saturating_sub(saved.saved_at);
+                        let age = crate::sidebar::age(std::time::Duration::from_secs(age));
+                        format!("{session} ({age} ago)")
+                    })
+                    .collect();
+                println!("{name:<12} {}", sessions.join(", "));
+            }
+            Ok(())
+        }
+        [] | [_] => {
+            let name = args.first().map_or(crate::persist::LAST, String::as_str);
+            let started = client::restore_hive(name)?;
+            if started.is_empty() {
+                println!("every session of {name} runs already");
+            } else {
+                println!(
+                    "started {}; attach with `hivemux -s NAME` or switch with Ctrl+B S",
+                    started.join(", ")
+                );
+            }
+            Ok(())
+        }
+        _ => bail!("usage: hivemux restore [NAME | --list]"),
+    }
+}
+
 /// `hivemux update`: the running server becomes this binary, keeping every
 /// pane and the attached client, see `upgrade`.
 pub fn update() -> Result<()> {

@@ -197,6 +197,47 @@ fn session(mut stream: UnixStream, writer: &Writer) -> Result<Outcome> {
     }
 }
 
+/// The layouts of every running session, for a save file.
+pub fn snapshot_all() -> Result<crate::persist::Hive> {
+    let mut hive = crate::persist::Hive::default();
+    for name in crate::protocol::sessions() {
+        let reply = request_at(&session_socket(&name)?, Request::Snapshot)
+            .with_context(|| format!("session {name}"))?;
+        hive.sessions.insert(
+            name,
+            crate::persist::HiveSession {
+                saved_at: crate::persist::now(),
+                layout: serde_json::from_value(reply)?,
+            },
+        );
+    }
+    Ok(hive)
+}
+
+/// Starts every session of save file `name` that does not run, each
+/// brought back from its layout there. Returns the sessions started.
+pub fn restore_hive(name: &str) -> Result<Vec<String>> {
+    if std::env::var_os("HIVEMUX_SOCKET").is_some() {
+        bail!("restoring sessions needs their names, unset HIVEMUX_SOCKET");
+    }
+    let Some(hive) = crate::persist::load_hive(name)? else {
+        bail!("there is no save called {name}");
+    };
+    let mut started = Vec::new();
+    for (session, saved) in hive.sessions {
+        let socket = session_socket(&session)?;
+        if UnixStream::connect(&socket).is_ok() {
+            continue;
+        }
+        // The server brings back what it finds in its state file.
+        let path = crate::persist::path_for(&session)?;
+        crate::persist::write(&path, &crate::persist::to_json(&saved.layout)?)?;
+        start_server(&socket, Some(&session))?;
+        started.push(session);
+    }
+    Ok(started)
+}
+
 /// Starts a server in the background and connects to it. With `session`,
 /// the server is that named session, whatever this process was started for.
 fn start_server(path: &Path, session: Option<&str>) -> Result<UnixStream> {
