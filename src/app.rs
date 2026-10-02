@@ -412,13 +412,17 @@ impl App {
         // Ended on purpose: kept in the save file `last` instead, from where
         // `hivemux restore` brings it back. A session whose last shell
         // exited has nothing to keep.
+        // Stopped with the machine: the saved layout stays as it was before
+        // the shells died, and the next server brings it back.
+        if crate::server::stopped() {
+            return Ok(());
+        }
         if !app.panes.is_empty()
             && let Err(e) = persist::keep_in_last(&protocol::session_name(), app.saved())
         {
             eprintln!("could not keep the session in the last save: {e:#}");
         }
         // The session was ended on purpose, there is nothing to bring back.
-        // A server that dies with the machine never gets here.
         if let Some(path) = &app.state_path {
             persist::remove(path);
         }
@@ -635,6 +639,10 @@ impl App {
         let Some(path) = self.state_path.clone() else {
             return;
         };
+        // Its panes are dying with it, a layout without them is not worth keeping.
+        if crate::server::stopped() {
+            return;
+        }
         if self.last_save_at.elapsed() < Duration::from_secs(1) {
             return;
         }
@@ -653,7 +661,7 @@ impl App {
     }
 
     fn event_loop(&mut self, rx: &Receiver<AppEvent>) {
-        while !self.quit {
+        while !self.quit && !crate::server::stopped() {
             (_, self.body, self.sidebar) = self.areas(self.screen);
             self.sync_sizes();
             self.update_agents();

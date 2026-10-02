@@ -5,6 +5,7 @@ use std::fs;
 use std::os::fd::{AsRawFd, FromRawFd};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::thread;
 
@@ -14,7 +15,31 @@ use crate::app::{App, AppEvent};
 use crate::protocol::socket_path;
 use crate::upgrade;
 
+/// Set once the server is told to stop from outside: SIGTERM or SIGHUP,
+/// as a shutdown or logout sends to every process at once.
+static STOPPED: AtomicBool = AtomicBool::new(false);
+
+/// True when the server was told to stop from outside. Its shells die in
+/// the same moment, which must not look like the session being ended.
+pub fn stopped() -> bool {
+    STOPPED.load(Ordering::Relaxed)
+}
+
+extern "C" fn on_stop(_: libc::c_int) {
+    STOPPED.store(true, Ordering::Relaxed);
+}
+
+fn catch_stop_signals() {
+    for signal in [libc::SIGTERM, libc::SIGHUP, libc::SIGINT] {
+        // SAFETY: the handler only stores to an atomic.
+        unsafe {
+            libc::signal(signal, on_stop as *const () as libc::sighandler_t);
+        }
+    }
+}
+
 pub fn run() -> Result<()> {
+    catch_stop_signals();
     let path = socket_path()?;
     // After `hivemux update` the socket is open already.
     let handover = upgrade::take();
