@@ -66,7 +66,7 @@ another one), `s` saves all running sessions as a hive and `h` opens the hives.
 | `Ctrl+B` `=` | Give all panes equal sizes |
 | `Ctrl+B` `f` … | Floating panes menu: `f` float/tile, `n` new, `o` next, arrows move |
 | `Ctrl+B` `Shift+←↑↓→` | Move a floating pane |
-| `Ctrl+B` `n` | New window, asks for its name right away (Esc leaves it without one) |
+| `Ctrl+B` `n` | New window, asks for its name right away (Esc closes it again) |
 | `Ctrl+B` `w` … | Windows menu: `1`–`9`, `c` new, `n`/`p` next/previous |
 | `Ctrl+B` `1`–`9` | Go to window, an empty one starts a shell |
 | `Ctrl+B` `←↑↓→` | Focus the pane in that direction |

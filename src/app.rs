@@ -130,6 +130,13 @@ enum PromptFor {
     SaveHive,
     /// A new name for the hive called this.
     RenameHive(String),
+    /// The name of a window just opened. Esc closes it again and goes back
+    /// to the window it was opened from.
+    NewWindow {
+        window: u8,
+        pane: PaneId,
+        back: u8,
+    },
 }
 
 /// A mouse drag in progress.
@@ -1551,9 +1558,18 @@ impl App {
             // A new window asks for its name right away, Esc leaves it without one.
             Command::NewWorkspace => match self.free_workspace() {
                 Some(n) => {
+                    let back = self.workspace;
                     self.switch_workspace(n);
                     if self.workspace == n {
-                        self.start_prompt(RenameTarget::Workspace(n));
+                        self.prompt = Some(Prompt {
+                            purpose: PromptFor::NewWindow {
+                                window: n,
+                                pane: self.ws.focus,
+                                back,
+                            },
+                            text: String::new(),
+                        });
+                        self.mode = Mode::Prompt;
                     }
                 }
                 None => self.flash = Some("all 9 windows are in use".into()),
@@ -2806,13 +2822,22 @@ impl App {
         match key.code {
             KeyCode::Esc => {
                 let searching = matches!(prompt.purpose, PromptFor::Search { .. });
-                self.prompt = None;
+                let purpose = self.prompt.take().map(|p| p.purpose);
                 self.mode = if searching { Mode::Copy } else { Mode::Normal };
+                if let Some(PromptFor::NewWindow { pane, back, .. }) = purpose {
+                    self.cancel_new_window(pane, back);
+                }
             }
             KeyCode::Enter => {
                 let Prompt { purpose, text } = self.prompt.take().expect("checked above");
                 self.mode = Mode::Normal;
                 match purpose {
+                    PromptFor::NewWindow { window, .. } => {
+                        let name = Some(text).filter(|t| !t.trim().is_empty());
+                        if let Err(e) = self.rename(RenameTarget::Workspace(window), name) {
+                            self.flash = Some(e);
+                        }
+                    }
                     PromptFor::Rename(target) => {
                         let name = Some(text).filter(|t| !t.trim().is_empty());
                         if let Err(e) = self.rename(target, name) {
@@ -3225,6 +3250,15 @@ impl App {
     /// Removes pane `id`, killing its process if it still runs. A workspace
     /// without panes disappears. When the active one does, another one is
     /// shown, and when none is left, hivemux quits.
+    /// Esc on a new window's name: it was not wanted after all. Back to the
+    /// window it was opened from, then its shell goes.
+    fn cancel_new_window(&mut self, pane: PaneId, back: u8) {
+        if self.workspace_exists(back) {
+            self.switch_workspace(back);
+        }
+        self.close(pane);
+    }
+
     fn close(&mut self, id: PaneId) {
         if self.panes.remove(&id).is_none() {
             return;
@@ -3582,6 +3616,7 @@ impl App {
         let title = match &prompt.purpose {
             PromptFor::Rename(RenameTarget::Pane(id)) => format!(" Name pane {id} "),
             PromptFor::Rename(RenameTarget::Workspace(n)) => format!(" Name window {n} "),
+            PromptFor::NewWindow { window, .. } => format!(" Name new window {window} "),
             PromptFor::Search { forward: true } => " Search down ".to_owned(),
             PromptFor::Search { forward: false } => " Search up ".to_owned(),
             PromptFor::NewSession => " New session ".to_owned(),
@@ -3600,6 +3635,7 @@ impl App {
             Line::styled(
                 match prompt.purpose {
                     PromptFor::Rename(_) => "Enter save · empty clears the name · Esc cancel",
+                    PromptFor::NewWindow { .. } => "Enter save · Esc closes the window again",
                     PromptFor::Search { .. } => "Enter find · then n next, N previous · Esc cancel",
                     PromptFor::NewSession => "Enter start and switch · letters, digits, - and _",
                     PromptFor::RenameSession(_) => "Enter rename · letters, digits, - and _",
