@@ -55,10 +55,10 @@ For scripts and agents:
   send [--pane N] [--no-enter] <text>   type text into a pane
   notify [--title T] [--pane N] <text>  show a notification (desktop, terminal or
                                         off, as set in the settings)
-  new [--float] [--workspace N] [-- command args...]
+  new [--float] [--window N] [-- command args...]
                                         start a command in a new pane
-  rename [--pane N | --workspace N] [--clear | <name>]
-                                        name a pane or a workspace
+  rename [--pane N | --window N] [--clear | <name>]
+                                        name a pane or a window
   read [--pane N] [--lines N]           print a pane's screen, or its last N lines
   wait [--pane N] --until <state> [--timeout S]
                                         wait for an agent: working, blocked, idle,

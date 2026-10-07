@@ -965,7 +965,7 @@ impl App {
     ) -> Reply {
         let n = workspace.unwrap_or(self.workspace);
         if !(1..=9).contains(&n) {
-            return Err(format!("no workspace {n}, there are 1 to 9"));
+            return Err(format!("no window {n}, there are 1 to 9"));
         }
         let cwd = cwd.or_else(|| self.focused_cwd());
         let id = self.next_id;
@@ -1071,8 +1071,8 @@ impl App {
         };
         let cwd = self.panes.get(&id).and_then(|pane| pane.cwd());
         let place = match (self.workspace_of(id), cwd) {
-            (Some(n), Some(cwd)) => format!("workspace {n} · {}", tilde(&cwd)),
-            (Some(n), None) => format!("workspace {n}"),
+            (Some(n), Some(cwd)) => format!("window {n} · {}", tilde(&cwd)),
+            (Some(n), None) => format!("window {n}"),
             _ => String::new(),
         };
         self.send_notification(&format!("{who} {what}"), &place);
@@ -1548,11 +1548,16 @@ impl App {
             Command::SessionMenu => self.mode = Mode::Menu(0),
             Command::Settings => self.mode = Mode::Settings(0),
             Command::Workspace(n) => self.switch_workspace(n),
-            Command::NewWorkspace => {
-                if let Some(n) = self.free_workspace() {
+            // A new window asks for its name right away, Esc leaves it without one.
+            Command::NewWorkspace => match self.free_workspace() {
+                Some(n) => {
                     self.switch_workspace(n);
+                    if self.workspace == n {
+                        self.start_prompt(RenameTarget::Workspace(n));
+                    }
                 }
-            }
+                None => self.flash = Some("all 9 windows are in use".into()),
+            },
             Command::NextWorkspace => self.step_workspace(true),
             Command::PrevWorkspace => self.step_workspace(false),
             // Prefix twice sends the prefix key itself to the pane.
@@ -2886,7 +2891,7 @@ impl App {
                 let ws = if n == self.workspace {
                     &mut self.ws
                 } else {
-                    self.hidden.get_mut(&n).ok_or(format!("no workspace {n}"))?
+                    self.hidden.get_mut(&n).ok_or(format!("no window {n}"))?
                 };
                 ws.name = name.clone();
             }
@@ -3297,7 +3302,7 @@ impl App {
         let pane = match spawned {
             Ok(pane) => pane,
             Err(e) => {
-                eprintln!("failed to start a shell for workspace {n}: {e:#}");
+                eprintln!("failed to start a shell for window {n}: {e:#}");
                 return;
             }
         };
@@ -3576,7 +3581,7 @@ impl App {
         let Some(prompt) = &self.prompt else { return };
         let title = match &prompt.purpose {
             PromptFor::Rename(RenameTarget::Pane(id)) => format!(" Name pane {id} "),
-            PromptFor::Rename(RenameTarget::Workspace(n)) => format!(" Name workspace {n} "),
+            PromptFor::Rename(RenameTarget::Workspace(n)) => format!(" Name window {n} "),
             PromptFor::Search { forward: true } => " Search down ".to_owned(),
             PromptFor::Search { forward: false } => " Search up ".to_owned(),
             PromptFor::NewSession => " New session ".to_owned(),
@@ -4267,7 +4272,7 @@ fn sidebar_buttons(area: Rect) -> Vec<Button> {
     place_buttons(
         row,
         &[
-            (" + workspace ", Command::NewWorkspace, t.success),
+            (" + window ", Command::NewWorkspace, t.success),
             (" ⧉ float ", Command::NewFloat, t.cyan),
             (" ⚙ ", Command::Settings, t.orange),
         ],

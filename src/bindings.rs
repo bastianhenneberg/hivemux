@@ -154,7 +154,7 @@ impl Group {
             Group::Session => "Session",
             Group::More => "More",
             Group::Floating => "Floating panes",
-            Group::Workspaces => "Workspaces",
+            Group::Workspaces => "Windows",
             Group::Commands => "Your commands",
             Group::Sessions => "Sessions and hives",
         }
@@ -332,7 +332,7 @@ pub const BINDINGS: &[Binding] = &[
     },
     Binding {
         label: "1-9",
-        description: "workspace",
+        description: "window",
         group: Group::Navigate,
         keys: &[
             (Key::plain(Char('1')), C::Workspace(1)),
@@ -348,9 +348,15 @@ pub const BINDINGS: &[Binding] = &[
     },
     Binding {
         label: "w",
-        description: "workspaces…",
+        description: "windows…",
         group: Group::Navigate,
         keys: &[(Key::plain(Char('w')), C::Open(Menu::Workspaces))],
+    },
+    Binding {
+        label: "n",
+        description: "new window",
+        group: Group::Navigate,
+        keys: &[(Key::plain(Char('n')), C::NewWorkspace)],
     },
     Binding {
         label: "[",
@@ -574,7 +580,7 @@ pub const BINDINGS: &[Binding] = &[
     // Workspaces, after the prefix and `w`.
     Binding {
         label: "1-9",
-        description: "go to workspace",
+        description: "go to window",
         group: Group::Workspaces,
         keys: &[
             (Key::plain(Char('1')), C::Workspace(1)),
@@ -590,13 +596,13 @@ pub const BINDINGS: &[Binding] = &[
     },
     Binding {
         label: "r",
-        description: "name workspace",
+        description: "name window",
         group: Group::Workspaces,
         keys: &[(Key::plain(Char('r')), C::RenameWorkspace)],
     },
     Binding {
         label: "c",
-        description: "new workspace",
+        description: "new window",
         group: Group::Workspaces,
         keys: &[(Key::plain(Char('c')), C::NewWorkspace)],
     },
@@ -816,6 +822,14 @@ mod tests {
             Some(C::LastPane)
         );
         assert_eq!(lookup(Menu::Root, event(Char('z'), none)), Some(C::Zoom));
+        assert_eq!(
+            lookup(Menu::Root, event(Char('n'), none)),
+            Some(C::NewWorkspace)
+        );
+        assert_eq!(
+            lookup(Menu::Workspaces, event(Char('c'), none)),
+            Some(C::NewWorkspace)
+        );
     }
 
     #[test]

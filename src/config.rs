@@ -412,7 +412,7 @@ pub const SETTINGS: &[Setting] = &[
         step: |c, forward| c.bars.control = step_placement(c.bars.control(), false, forward),
     },
     Setting {
-        name: "Workspace tabs",
+        name: "Window tabs",
         value: |c| c.bars.tabs.name().to_owned(),
         step: |c, forward| c.bars.tabs = step_placement(c.bars.tabs, true, forward),
     },

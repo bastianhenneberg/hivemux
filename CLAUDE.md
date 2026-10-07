@@ -25,6 +25,10 @@ Projekt-Slug: `hivemux`
   nach Cursor bzw. Größe. Bei Resize wird das Terminal neu gebaut.
 - Workspace-Logik (Tiling-Baum + Floats + Fokus) ist reine Geometrie in `src/workspace.rs` und dort
   getestet. `App` hält den aktiven Workspace in `ws`, die übrigen in `hidden`, und tauscht beim Wechsel.
+- Begriffe wie tmux: in der Oberfläche, CLI und README heißt ein Workspace **Window** (Session →
+  Window → Pane), „Hive“ ist unser eigener Begriff. Intern (Code, Save-Files, Protokoll, JSON der
+  CLI-Antworten) bleibt `workspace`, damit Live-Update und alte Saves weiterlaufen. `--workspace`
+  bleibt Alias für `--window`.
 - Maus, Selektion, Copy-Mode: `App::mouse`, `App::copy_key`. Positionen in Selektion/Copy-Cursor sind
   *absolute* Zeilen (0 = älteste Zeile im Verlauf), damit Scrollen sie nicht verschiebt. Text holt
   `pane::text_between`. Maus-Kodierung für Programme: `src/mouse.rs`, Clipboard (OSC 52): `src/clipboard.rs`.
@@ -39,7 +43,7 @@ Projekt-Slug: `hivemux`
 - Verbindungen attachen erst nach `ClientMsg::Attach`; alle anderen (CLI, Agents) schicken
   `ClientMsg::Request` und bekommen `ServerMsg::Reply`. Befehle: `src/cli.rs`.
 - Agent-Tests ohne echten Agent: Skript namens `claude` im Scratchpad, das arbeitet und dann eine
-  Frage stellt, per `hivemux new --workspace 2 -- <skript>` starten.
+  Frage stellt, per `hivemux new --window 2 -- <skript>` starten.
 - Live-Update: `hivemux update` (`src/upgrade.rs`): Server execs das neue Binary im selben Prozess,
   PTY-Master-FDs, Listener und Client-Verbindung ohne `FD_CLOEXEC` weiter, Rest (Layout, Screens
   als `state_formatted`, History als Text) in `<socket>.upgrade.json`, Env `HIVEMUX_UPGRADE`.

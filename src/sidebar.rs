@@ -104,7 +104,7 @@ pub fn lines(data: &Data, width: u16) -> Vec<(Line<'static>, Option<Target>)> {
     let dim = Style::new().fg(t.muted);
     let mut out = Vec::new();
 
-    out.push((Line::styled("Workspaces", heading(t.blue)), None));
+    out.push((Line::styled("Windows", heading(t.blue)), None));
     for ws in &data.workspaces {
         let marker = if ws.active { "▸ " } else { "  " };
         let mut right = String::new();

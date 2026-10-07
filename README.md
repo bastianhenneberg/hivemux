@@ -2,16 +2,19 @@
 
 A terminal multiplexer and window manager for humans and their coding agents, written in Rust.
 
-hivemux combines tiling and floating windows with a tmux-style prefix, and keeps an eye on
+hivemux combines tiling and floating panes with a tmux-style prefix, and keeps an eye on
 the agents running in its panes: working, blocked, or idle.
 
+The names follow tmux: a session holds windows, a window holds panes. A *hive*, a saved group
+of sessions, is hivemux's own, as tmux has nothing like it.
+
 > **Status:** early prototype. hivemux runs shells in split panes, including full-screen
-> programs like nvim, spread over workspaces, and keeps them running when you detach.
+> programs like nvim, spread over windows, and keeps them running when you detach.
 
 ## Ideas
 
 - **tmux-style prefix keys** (`Ctrl+B` by default)
-- **Tiling and floating windows**: a BSP layout tree with a floating layer on top, plus workspaces
+- **Tiling and floating panes**: a BSP layout tree with a floating layer on top, plus windows
 - **Server/client architecture**: detach and reattach without stopping work
 - **Agent-aware**: every pane is marked working, blocked, or idle
 - **Socket API** so agents and scripts can drive hivemux
@@ -24,7 +27,7 @@ Inspired by [TUIOS](https://github.com/Gaurav-Gosain/tuios) and [herdr](https://
 1. ~~One shell in one pane (PTY → VT emulation → rendering)~~ ✓
 2. ~~Splits with a BSP tree, focus, resize, prefix keys~~ ✓
 3. ~~Server/client split with detach and reattach~~ ✓
-4. ~~Floating windows and workspaces~~ ✓
+4. ~~Floating panes and windows~~ ✓
 5. ~~Copy mode, scrollback, mouse~~ ✓
 6. ~~Agent status, socket API~~ ✓
 7. ~~Layout persistence across restarts~~ ✓
@@ -57,18 +60,19 @@ another one), `s` saves all running sessions as a hive and `h` opens the hives.
 | `Ctrl+B` `%` | Split the pane side by side |
 | `Ctrl+B` `"` | Split the pane top and bottom |
 | `Ctrl+B` `x` | Close the pane (asks first) |
-| `Ctrl+B` `r` | Name the pane (`Ctrl+B` `w` `r` names the workspace) |
-| `Ctrl+B` `z` | Zoom: the pane alone over the whole workspace, again to go back |
+| `Ctrl+B` `r` | Name the pane (`Ctrl+B` `w` `r` names the window) |
+| `Ctrl+B` `z` | Zoom: the pane alone over the whole window, again to go back |
 | `Ctrl+B` `{` / `}` | Swap the pane with the previous / next one |
 | `Ctrl+B` `=` | Give all panes equal sizes |
 | `Ctrl+B` `f` … | Floating panes menu: `f` float/tile, `n` new, `o` next, arrows move |
 | `Ctrl+B` `Shift+←↑↓→` | Move a floating pane |
-| `Ctrl+B` `w` … | Workspaces menu: `1`–`9`, `c` new, `n`/`p` next/previous |
-| `Ctrl+B` `1`–`9` | Go to workspace, an empty one starts a shell |
+| `Ctrl+B` `n` | New window, asks for its name right away (Esc leaves it without one) |
+| `Ctrl+B` `w` … | Windows menu: `1`–`9`, `c` new, `n`/`p` next/previous |
+| `Ctrl+B` `1`–`9` | Go to window, an empty one starts a shell |
 | `Ctrl+B` `←↑↓→` | Focus the pane in that direction |
 | `Ctrl+B` `o` | Focus the next pane |
-| `Ctrl+B` `;` | Back to the pane focused before, across workspaces |
-| `Ctrl+B` `g` | Go to any pane: type to filter by workspace, name, program, state or directory |
+| `Ctrl+B` `;` | Back to the pane focused before, across windows |
+| `Ctrl+B` `g` | Go to any pane: type to filter by window, name, program, state or directory |
 | `Ctrl+B` `a` | Jump to the agent that has waited longest for you, then to finished ones |
 | `Ctrl+B` `[` | Copy mode: scroll back with vim keys (`Ctrl-U`/`Ctrl-D`, `Ctrl-B`/`Ctrl-F`, `g`/`G`), `/` and `?` search down and up, `n`/`N` next, `v` select, `y` copy, `q` quit |
 | `Ctrl+B` `u` | Copy mode, one page up right away (`PgUp` works too) |
@@ -96,9 +100,9 @@ A pane closes when its shell exits, hivemux exits with the last pane.
 
 ## Sidebar
 
-A sidebar on the right, like the rail in TUIOS, lists every workspace with its project (the
-focused pane's directory) and what its agents are doing, every agent across all workspaces with
-its workspace, directory and how long it has been in its state, and the git branch of the
+A sidebar on the right, like the rail in TUIOS, lists every window with its project (the
+focused pane's directory) and what its agents are doing, every agent across all windows with
+its window, directory and how long it has been in its state, and the git branch of the
 focused pane with its changed files. Agents waiting for you come first. Enter or a click on a
 changed file shows its diff in a floating pane, `o` in the sidebar opens it in `$EDITOR`. Click a row to go there. `Ctrl+B b` shows or
 hides it (as in TUIOS), `Ctrl+B e` moves the keyboard into it, the settings put it left or right.
@@ -112,7 +116,7 @@ off.
 ## Agents
 
 Every pane running a coding agent shows what it is doing: `● working`, `◆ blocked` (it waits
-for you), `✦ done` (finished while you were elsewhere) or `✓ idle`. A workspace tab turns red when an agent there waits, the bell rings, and
+for you), `✦ done` (finished while you were elsewhere) or `✓ idle`. A window tab turns red when an agent there waits, the bell rings, and
 `Ctrl+B a` takes you to it. You also get a desktop notification when an agent waits or finishes
 while you look elsewhere or are detached: through `notify-send`, or as OSC 9 for terminals like
 Ghostty and WezTerm, or not at all (setting `notifications = "system" | "terminal" | "off"`).
@@ -135,12 +139,12 @@ Scripts and agents can drive hivemux too:
 ```bash
 hivemux list [--json]                          # panes with program, state and directory
 hivemux send --pane 3 "run the tests"          # type into a pane, then Enter
-hivemux new --workspace 2 -- claude --resume   # start a command in a new pane
+hivemux new --window 2 -- claude --resume      # start a command in a new pane
 hivemux new --float                            # a floating shell
 hivemux rename "tests"                          # name the pane this runs in
 hivemux wait --pane 3 --until ready            # wait until an agent is idle or done
 hivemux read --pane 3 --lines 20               # what it wrote last
-hivemux rename --workspace 2 api               # name a workspace
+hivemux rename --window 2 api                  # name a window
 hivemux notify "tests are green"              # a notification, titled after this pane
 hivemux notify --title build "done in 42 s"    # with a title of its own
 ```
@@ -164,7 +168,7 @@ keeps its old code until it reattaches, fine as long as the protocol stays compa
 
 ## Restarts
 
-hivemux saves the layout to `~/.local/state/hivemux/session.json` while it runs: workspaces,
+hivemux saves the layout to `~/.local/state/hivemux/session.json` while it runs: windows,
 splits, floating panes and each pane's directory. If the server dies with the machine, the next
 `hivemux` brings the layout back, shells start in their old directories, and Claude Code and
 Codex sessions known from the hooks are resumed (`claude --resume <id>`). Processes and screen
@@ -173,7 +177,7 @@ exiting the last shell) deletes the file.
 
 ## Hives
 
-A hive is a group of sessions saved together under a name: their workspaces, splits, floating
+A hive is a group of sessions saved together under a name: their windows, splits, floating
 panes and directories. `Ctrl+B H` opens the hives, and every key it takes is listed in it:
 
 | Key | Action |
@@ -212,14 +216,14 @@ the detection, the setting `images = false` turns it off.
 
 ## Mouse
 
-The terminal window's title shows the workspace and the focused pane, e.g. `hivemux · 2 api · claude`.
+The terminal's title shows the window and the focused pane, e.g. `hivemux · 2 api · claude`.
 
 
-- Click a pane to focus it, click a workspace tab to switch to it, `+` after the tabs opens a
-  new workspace.
+- Click a pane to focus it, click a window tab to switch to it, `+` after the tabs opens a
+  new window.
 - The buttons in a pane's top border split it side by side (`┃`) or top and bottom (`━`), zoom
   it (`⤢`) or close it (`×`, asks first). Floating panes have `×` only.
-- The sidebar's bottom border opens a new workspace, a new floating pane or the settings.
+- The sidebar's bottom border opens a new window, a new floating pane or the settings.
 - Drag the border between two panes to resize them.
 - Drag a floating pane by its title bar, resize it by its bottom right corner.
 - Drag over text to select it, it is copied when you let go. A double click copies a word.
@@ -249,7 +253,7 @@ side = "right"      # "left" or "right"
 
 [bars]
 control = "bottom"  # hivemux badge, mode and hints: "top" or "bottom"
-tabs = "bottom"     # workspace tabs: "top", "bottom" or "off"
+tabs = "bottom"     # window tabs: "top", "bottom" or "off"
 path = "bottom"     # directory of the focused pane: "top", "bottom" or "off"
 
 [spacing]           # in cells, all 0 by default; a cell is about twice as tall as wide
@@ -269,7 +273,7 @@ window's edge when that padding is 0.
 Themes: `hivemux` is honey on your terminal's colours. `omarchy` follows the current Omarchy theme
 and changes with it. Any installed Omarchy theme (`catppuccin`, `gruvbox`, `tokyo-night`, …) can be
 picked by name, its `colors.toml` provides the colours. In the settings, ←/→ step through them.
-Themes colour more than the accent: every workspace has its own colour in tabs and sidebar,
+Themes colour more than the accent: every window has its own colour in tabs and sidebar,
 every mode its own badge, floating panes their own border, and the bars a surface of their
 own. The settings show the chosen theme's colours.
 

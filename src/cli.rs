@@ -107,7 +107,7 @@ pub fn ls() -> Result<()> {
             }
         }
         println!(
-            "{marker} {name:<16} {} panes in {} workspaces{agents}",
+            "{marker} {name:<16} {} panes in {} windows{agents}",
             panes.len(),
             workspaces.len()
         );
@@ -124,7 +124,7 @@ pub fn list(args: &[String]) -> Result<()> {
     }
     println!(
         "{:<5} {:<3} {:<8} {:<26} {:<8} DIRECTORY",
-        "PANE", "WS", "", "NAME", "STATE"
+        "PANE", "WIN", "", "NAME", "STATE"
     );
     for pane in value.as_array().into_iter().flatten() {
         let text = |key: &str| pane[key].as_str().unwrap_or("-").to_owned();
@@ -247,19 +247,14 @@ pub fn wait(args: &[String]) -> Result<()> {
     }
 }
 
-/// `hivemux rename [--pane N | --workspace N] [--clear | <name>...]`
+/// `hivemux rename [--pane N | --window N] [--clear | <name>...]`
 ///
 /// Without a target it names the pane it runs in, so an agent can label its
 /// own pane.
 pub fn rename(args: &[String]) -> Result<()> {
     let mut rest = args.to_vec();
     let clear = take_flag(&mut rest, "--clear");
-    let workspace = take_value(&mut rest, "--workspace")?
-        .map(|n| {
-            n.parse::<u8>()
-                .context("--workspace takes a number from 1 to 9")
-        })
-        .transpose()?;
+    let workspace = take_window(&mut rest)?;
     let target = match workspace {
         Some(n) => RenameTarget::Workspace(n),
         None => RenameTarget::Pane(take_pane(&mut rest)?.context("which pane? use --pane N")?),
@@ -267,7 +262,7 @@ pub fn rename(args: &[String]) -> Result<()> {
     let name = if clear {
         None
     } else if rest.is_empty() {
-        bail!("usage: hivemux rename [--pane N | --workspace N] [--clear | <name>...]");
+        bail!("usage: hivemux rename [--pane N | --window N] [--clear | <name>...]");
     } else {
         Some(rest.join(" "))
     };
@@ -275,7 +270,7 @@ pub fn rename(args: &[String]) -> Result<()> {
     Ok(())
 }
 
-/// `hivemux new [--float] [--workspace N] [-- command args...]`
+/// `hivemux new [--float] [--window N] [-- command args...]`
 pub fn new(args: &[String]) -> Result<()> {
     let (options, command) = match args.iter().position(|a| a == "--") {
         Some(i) => (args[..i].to_vec(), args[i + 1..].to_vec()),
@@ -283,12 +278,7 @@ pub fn new(args: &[String]) -> Result<()> {
     };
     let mut options = options;
     let float = take_flag(&mut options, "--float");
-    let workspace = take_value(&mut options, "--workspace")?
-        .map(|n| {
-            n.parse::<u8>()
-                .context("--workspace takes a number from 1 to 9")
-        })
-        .transpose()?;
+    let workspace = take_window(&mut options)?;
     if let Some(unknown) = options.first() {
         bail!("unknown option {unknown:?}, put the command after --");
     }
@@ -345,6 +335,20 @@ fn take_flag(args: &mut Vec<String>, flag: &str) -> bool {
     let before = args.len();
     args.retain(|a| a != flag);
     args.len() != before
+}
+
+/// `--window N`, or `--workspace N` as it was called before.
+fn take_window(args: &mut Vec<String>) -> Result<Option<u8>> {
+    let mut window = None;
+    for option in ["--window", "--workspace"] {
+        if let Some(n) = take_value(args, option)? {
+            window = Some(
+                n.parse::<u8>()
+                    .with_context(|| format!("{option} takes a number from 1 to 9"))?,
+            );
+        }
+    }
+    Ok(window)
 }
 
 fn take_value(args: &mut Vec<String>, option: &str) -> Result<Option<String>> {
